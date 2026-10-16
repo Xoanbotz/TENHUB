@@ -1,18 +1,14 @@
 --[[
 ================================================================================
-    XIANXIA GOD MODE v1.0
+    XIANXIA GOD MODE v1.1 (FIXED GUI)
     Script Created by ADIEL
     
-    Fitur:
-    - MASS HARVEST HERBS (auto detect tag "Herbs")
-    - KILL AURA (auto attack NPC tag "Enemy")
-    - AUTO FARM LOOP (harvest + kill sekaligus)
-    - ESP HERBS (nama + jarak)
-    - ESP ENEMY (nama + jarak + health)
-    - SPEED + JUMP boost
-    - Teleport ke Herb / Enemy
-    - GUI Horizontal 3 kolom
-    - NO EMOJI, double quote, task.wait, pcall
+    Fixes:
+    - Draggable now works properly (mouse + touch)
+    - Close button -> minimize to bubble (tidak hilang)
+    - Floating bubble -> bisa digeser, klik buat balikin GUI
+    - GUI di-resize biar fit di HP
+    - Tombol di kolom bisa di-scroll kalo penuh
 ================================================================================
 ]]
 
@@ -35,13 +31,13 @@ local Camera      = Workspace.CurrentCamera
 -- CONFIG
 --==============================================================================
 local CONFIG = {
-    HERB_TAGS         = {"Herbs"},
-    ENEMY_TAGS        = {"Enemy"},
-    FORCE_DISTANCE    = 999999,
-    ATTACK_RANGE      = 30,
+    HERB_TAGS          = {"Herbs"},
+    ENEMY_TAGS         = {"Enemy"},
+    FORCE_DISTANCE     = 999999,
+    ATTACK_RANGE       = 30,
     AUTO_FARM_INTERVAL = 0.5,
-    SPEED_VALUE       = 60,
-    JUMP_VALUE        = 120,
+    SPEED_VALUE        = 60,
+    JUMP_VALUE         = 120,
 }
 
 --==============================================================================
@@ -60,7 +56,7 @@ local STATE = {
     rootPart        = nil,
     connections     = {},
     espObjects      = {},
-    speedConnection = nil,
+    guiMinimized    = false,
 }
 
 local stats = {
@@ -129,7 +125,6 @@ local function harvestOneHerb(herb)
     if not herb or not herb.Parent then return false end
     local success = false
     
-    -- ProximityPrompt force
     pcall(function()
         local prompt = herb:FindFirstChildOfClass("ProximityPrompt")
         if not prompt then
@@ -145,7 +140,6 @@ local function harvestOneHerb(herb)
         end
     end)
     
-    -- ClickDetector force
     if not success then
         pcall(function()
             local cd = herb:FindFirstChildOfClass("ClickDetector")
@@ -160,7 +154,6 @@ local function harvestOneHerb(herb)
         end)
     end
     
-    -- Touch interest fallback
     if not success and STATE.rootPart then
         pcall(function()
             local part = herb:FindFirstChildWhichIsA("BasePart", true)
@@ -185,7 +178,7 @@ local function harvestAllHerbs()
         return 0
     end
     
-    log("Mengharvest " .. tostring(#herbs) .. " herbs...", "info")
+    log("Harvest " .. tostring(#herbs) .. " herbs...", "info")
     
     local count = 0
     for _, herb in ipairs(herbs) do
@@ -273,12 +266,10 @@ local function attackEnemy(enemyObj)
     
     if not tool then return false end
     
-    -- Method 1: Tool:Activate()
     pcall(function()
         tool:Activate()
     end)
     
-    -- Method 2: Fire remote di dalam tool
     pcall(function()
         for _, obj in ipairs(tool:GetDescendants()) do
             if obj:IsA("RemoteEvent") then
@@ -310,11 +301,9 @@ local function startKillAura()
     if STATE.connections.killAura then
         pcall(function() STATE.connections.killAura:Disconnect() end)
     end
-    
     STATE.connections.killAura = RunService.Heartbeat:Connect(function()
         pcall(killAuraTick)
     end)
-    
     log("Kill Aura: ON", "success")
 end
 
@@ -331,18 +320,14 @@ end
 --==============================================================================
 local function startAutoFarm()
     if STATE.connections.autoFarm then
-        pcall(function() STATE.connections.autoFarm:Disconnect() end)
+        pcall(function() task.cancel(STATE.connections.autoFarm) end)
     end
-    
     STATE.connections.autoFarm = task.spawn(function()
         while STATE.autoFarm do
-            pcall(function()
-                harvestAllHerbs()
-            end)
+            pcall(function() harvestAllHerbs() end)
             task.wait(CONFIG.AUTO_FARM_INTERVAL)
         end
     end)
-    
     log("Auto Farm: ON", "success")
 end
 
@@ -367,17 +352,19 @@ local function clearESP()
     STATE.espObjects = {}
 end
 
-local function createESP(target, color, label)
+local function createESP(target, color)
     if not target or not target.Parent then return end
-    
     local box = Instance.new("BoxHandleAdornment")
-    box.Name = "ESP_" .. label
-    box.Adornee = target
+    box.Name = "ESP"
     if target:IsA("Model") and target.PrimaryPart then
         box.Adornee = target.PrimaryPart
     elseif target:IsA("Model") then
         local root = target:FindFirstChild("HumanoidRootPart") or target:FindFirstChildWhichIsA("BasePart", true)
         if root then box.Adornee = root else return end
+    elseif target:IsA("BasePart") then
+        box.Adornee = target
+    else
+        return
     end
     box.Size = box.Adornee.Size + Vector3.new(0.5, 0.5, 0.5)
     box.AlwaysOnTop = true
@@ -390,18 +377,15 @@ end
 
 local function espTick()
     if not STATE.espHerbs and not STATE.espEnemies then return end
-    
     clearESP()
-    
     if STATE.espHerbs then
         for _, herb in ipairs(getAllHerbs()) do
-            createESP(herb, Color3.fromRGB(0, 255, 100), "Herb")
+            createESP(herb, Color3.fromRGB(0, 255, 100))
         end
     end
-    
     if STATE.espEnemies then
         for _, enemy in ipairs(getAllEnemies()) do
-            createESP(enemy.obj, Color3.fromRGB(255, 60, 60), "Enemy")
+            createESP(enemy.obj, Color3.fromRGB(255, 60, 60))
         end
     end
 end
@@ -410,7 +394,6 @@ local function startESP()
     if STATE.connections.esp then
         pcall(function() STATE.connections.esp:Disconnect() end)
     end
-    
     STATE.connections.esp = RunService.Heartbeat:Connect(function()
         pcall(espTick)
     end)
@@ -448,7 +431,7 @@ local function teleportToNearestHerb()
     end
     if nearest then
         teleportToPosition(nearest)
-        log("Teleport ke herb terdekat (" .. string.format("%.1f", nearestDist) .. " stud)", "info")
+        log("Teleport ke herb (" .. string.format("%.1f", nearestDist) .. " stud)", "info")
     else
         log("Tidak ada herb", "warn")
     end
@@ -468,7 +451,7 @@ local function teleportToNearestEnemy()
     end
     if nearest then
         teleportToPosition(nearest)
-        log("Teleport ke enemy terdekat (" .. string.format("%.1f", nearestDist) .. " stud)", "info")
+        log("Teleport ke enemy (" .. string.format("%.1f", nearestDist) .. " stud)", "info")
     else
         log("Tidak ada enemy", "warn")
     end
@@ -495,29 +478,105 @@ local function applySpeedJump()
 end
 
 --==============================================================================
--- GUI
+-- DRAGGABLE (FIXED - WORKS ON MOBILE)
+--==============================================================================
+local function makeDraggable(frame, handle)
+    if not frame or not handle then return end
+    
+    local dragging = false
+    local dragInput = nil
+    local dragStart = nil
+    local startPos = nil
+    
+    local function update(input)
+        local delta = input.Position - dragStart
+        frame.Position = UDim2.new(
+            startPos.X.Scale,
+            startPos.X.Offset + delta.X,
+            startPos.Y.Scale,
+            startPos.Y.Offset + delta.Y
+        )
+    end
+    
+    handle.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+            or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = true
+            dragStart = input.Position
+            startPos = frame.Position
+            
+            input.Changed:Connect(function()
+                if input.UserInputState == Enum.UserInputState.End then
+                    dragging = false
+                end
+            end)
+        end
+    end)
+    
+    handle.InputChanged:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseMovement
+            or input.UserInputType == Enum.UserInputType.Touch then
+            dragInput = input
+        end
+    end)
+    
+    UserInputService.InputChanged:Connect(function(input)
+        if input == dragInput and dragging then
+            update(input)
+        end
+    end)
+end
+
+--==============================================================================
+-- MINIMIZE / RESTORE
+--==============================================================================
+local function minimizeGUI()
+    if GUI_REFS.MainFrame then
+        GUI_REFS.MainFrame.Visible = false
+    end
+    if GUI_REFS.Bubble then
+        GUI_REFS.Bubble.Visible = true
+    end
+    STATE.guiMinimized = true
+end
+
+local function restoreGUI()
+    if GUI_REFS.MainFrame then
+        GUI_REFS.MainFrame.Visible = true
+    end
+    if GUI_REFS.Bubble then
+        GUI_REFS.Bubble.Visible = false
+    end
+    STATE.guiMinimized = false
+end
+
+--==============================================================================
+-- GUI CREATION
 --==============================================================================
 local function createGUI()
     local sg = Instance.new("ScreenGui")
     sg.Name = "XianxiaGodMode_ADIEL"
     sg.ResetOnSpawn = false
     sg.IgnoreGuiInset = true
+    sg.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
     sg.Parent = LocalPlayer:WaitForChild("PlayerGui")
     GUI_REFS.ScreenGui = sg
     
+    -- MAIN FRAME (dibuat scale biar fit di HP)
     local mf = Instance.new("Frame")
     mf.Name = "MainFrame"
-    mf.Size = UDim2.new(0, 720, 0, 280)
-    mf.Position = UDim2.new(0.5, -360, 0.5, -140)
+    mf.Size = UDim2.new(0, 680, 0, 300)
+    mf.Position = UDim2.new(0.5, -340, 0.5, -150)
     mf.BackgroundColor3 = Color3.fromRGB(15, 15, 20)
     mf.BorderSizePixel = 0
     mf.Active = true
+    mf.Draggable = true
     mf.Parent = sg
     GUI_REFS.MainFrame = mf
     local mfc = Instance.new("UICorner"); mfc.CornerRadius = UDim.new(0, 10); mfc.Parent = mf
     local mfs = Instance.new("UIStroke"); mfs.Color = Color3.fromRGB(60, 40, 80); mfs.Thickness = 1; mfs.Parent = mf
     
-    -- TITLE
+    -- TITLE BAR (handle drag)
     local tb = Instance.new("Frame")
     tb.Name = "TitleBar"
     tb.Size = UDim2.new(1, 0, 0, 35)
@@ -537,13 +596,14 @@ local function createGUI()
     tl.Size = UDim2.new(1, -90, 1, 0)
     tl.Position = UDim2.new(0, 12, 0, 0)
     tl.BackgroundTransparency = 1
-    tl.Text = "XIANXIA GOD MODE v1.0 - Script Created by ADIEL"
+    tl.Text = "XIANXIA GOD MODE v1.1 - ADIEL"
     tl.TextColor3 = Color3.fromRGB(200, 130, 255)
     tl.TextSize = 13
     tl.Font = Enum.Font.GothamBold
     tl.TextXAlignment = Enum.TextXAlignment.Left
     tl.Parent = tb
     
+    -- MINIMIZE BUTTON (bukan close, minimize ke bubble)
     local minB = Instance.new("TextButton")
     minB.Size = UDim2.new(0, 30, 0, 25)
     minB.Position = UDim2.new(1, -70, 0, 5)
@@ -555,7 +615,9 @@ local function createGUI()
     minB.Font = Enum.Font.GothamBold
     minB.Parent = tb
     local mbc = Instance.new("UICorner"); mbc.CornerRadius = UDim.new(0, 5); mbc.Parent = minB
+    GUI_REFS.Buttons.minBtn = minB
     
+    -- CLOSE BUTTON (minimize to bubble, TIDAK destroy)
     local clB = Instance.new("TextButton")
     clB.Size = UDim2.new(0, 30, 0, 25)
     clB.Position = UDim2.new(1, -36, 0, 5)
@@ -567,15 +629,17 @@ local function createGUI()
     clB.Font = Enum.Font.GothamBold
     clB.Parent = tb
     local cbc = Instance.new("UICorner"); cbc.CornerRadius = UDim.new(0, 5); cbc.Parent = clB
-    GUI_REFS.Buttons.minBtn = minB
     GUI_REFS.Buttons.closeBtn = clB
     
-    -- COL 1: HERBS
-    local c1 = Instance.new("Frame")
-    c1.Size = UDim2.new(0, 225, 0, 230)
-    c1.Position = UDim2.new(0, 12, 0, 42)
+    -- COL 1: HERBS (scroll frame buat isi panjang)
+    local c1 = Instance.new("ScrollingFrame")
+    c1.Name = "Col1"
+    c1.Size = UDim2.new(0, 218, 0, 250)
+    c1.Position = UDim2.new(0, 6, 0, 42)
     c1.BackgroundColor3 = Color3.fromRGB(20, 20, 28)
     c1.BorderSizePixel = 0
+    c1.ScrollBarThickness = 4
+    c1.CanvasSize = UDim2.new(0, 0, 0, 220)
     c1.Parent = mf
     local c1c = Instance.new("UICorner"); c1c.CornerRadius = UDim.new(0, 8); c1c.Parent = c1
     
@@ -606,18 +670,21 @@ local function createGUI()
         return b
     end
     
-    GUI_REFS.Buttons.harvestNow = mkBtn(c1, "HarvestNow", "HARVEST ALL SEKARANG", 34, 42, Color3.fromRGB(0, 160, 90))
-    GUI_REFS.Buttons.autoHarvest = mkBtn(c1, "AutoHarvest", "AUTO HARVEST: OFF", 82, 30, Color3.fromRGB(0, 110, 180))
-    GUI_REFS.Buttons.autoFarm = mkBtn(c1, "AutoFarm", "AUTO FARM LOOP: OFF", 116, 30, Color3.fromRGB(80, 60, 160))
-    GUI_REFS.Buttons.espHerbs = mkBtn(c1, "ESPHerbs", "ESP HERBS: OFF", 150, 28, Color3.fromRGB(100, 100, 0))
-    GUI_REFS.Buttons.tpHHerb = mkBtn(c1, "TpHerb", "TELEPORT KE HERB", 182, 28, Color3.fromRGB(60, 80, 120))
+    GUI_REFS.Buttons.harvestNow = mkBtn(c1, "HarvestNow", "HARVEST ALL", 32, 38, Color3.fromRGB(0, 160, 90))
+    GUI_REFS.Buttons.autoHarvest = mkBtn(c1, "AutoHarvest", "AUTO HARVEST: OFF", 74, 30, Color3.fromRGB(0, 110, 180))
+    GUI_REFS.Buttons.autoFarm = mkBtn(c1, "AutoFarm", "AUTO FARM: OFF", 108, 30, Color3.fromRGB(80, 60, 160))
+    GUI_REFS.Buttons.espHerbs = mkBtn(c1, "ESPHerbs", "ESP HERBS: OFF", 142, 28, Color3.fromRGB(100, 100, 0))
+    GUI_REFS.Buttons.tpHHerb = mkBtn(c1, "TpHerb", "TELEPORT HERB", 174, 28, Color3.fromRGB(60, 80, 120))
     
     -- COL 2: COMBAT
-    local c2 = Instance.new("Frame")
-    c2.Size = UDim2.new(0, 225, 0, 230)
-    c2.Position = UDim2.new(0, 247, 0, 42)
+    local c2 = Instance.new("ScrollingFrame")
+    c2.Name = "Col2"
+    c2.Size = UDim2.new(0, 218, 0, 250)
+    c2.Position = UDim2.new(0, 230, 0, 42)
     c2.BackgroundColor3 = Color3.fromRGB(20, 20, 28)
     c2.BorderSizePixel = 0
+    c2.ScrollBarThickness = 4
+    c2.CanvasSize = UDim2.new(0, 0, 0, 220)
     c2.Parent = mf
     local c2c = Instance.new("UICorner"); c2c.CornerRadius = UDim.new(0, 8); c2c.Parent = c2
     
@@ -625,25 +692,28 @@ local function createGUI()
     c2t.Size = UDim2.new(1, -16, 0, 22)
     c2t.Position = UDim2.new(0, 8, 0, 6)
     c2t.BackgroundTransparency = 1
-    c2t.Text = "COMBAT MODE"
+    c2t.Text = "COMBAT"
     c2t.TextColor3 = Color3.fromRGB(255, 100, 100)
     c2t.TextSize = 14
     c2t.Font = Enum.Font.GothamBold
     c2t.TextXAlignment = Enum.TextXAlignment.Left
     c2t.Parent = c2
     
-    GUI_REFS.Buttons.killAura = mkBtn(c2, "KillAura", "KILL AURA: OFF", 34, 42, Color3.fromRGB(180, 50, 50))
-    GUI_REFS.Buttons.espEnemies = mkBtn(c2, "ESPEnemies", "ESP ENEMY: OFF", 82, 28, Color3.fromRGB(100, 100, 0))
-    GUI_REFS.Buttons.tpEnemy = mkBtn(c2, "TpEnemy", "TELEPORT KE ENEMY", 114, 28, Color3.fromRGB(60, 80, 120))
-    GUI_REFS.Buttons.equipTool = mkBtn(c2, "EquipTool", "EQUIP TOOL", 146, 28, Color3.fromRGB(70, 70, 70))
-    GUI_REFS.Buttons.scanCombat = mkBtn(c2, "ScanCombat", "SCAN ENEMY", 178, 28, Color3.fromRGB(60, 50, 90))
+    GUI_REFS.Buttons.killAura = mkBtn(c2, "KillAura", "KILL AURA: OFF", 32, 38, Color3.fromRGB(180, 50, 50))
+    GUI_REFS.Buttons.espEnemies = mkBtn(c2, "ESPEnemies", "ESP ENEMY: OFF", 74, 28, Color3.fromRGB(100, 100, 0))
+    GUI_REFS.Buttons.tpEnemy = mkBtn(c2, "TpEnemy", "TELEPORT ENEMY", 106, 28, Color3.fromRGB(60, 80, 120))
+    GUI_REFS.Buttons.equipTool = mkBtn(c2, "EquipTool", "EQUIP TOOL", 138, 28, Color3.fromRGB(70, 70, 70))
+    GUI_REFS.Buttons.scanCombat = mkBtn(c2, "ScanCombat", "SCAN ENEMY", 170, 28, Color3.fromRGB(60, 50, 90))
     
     -- COL 3: MOVEMENT + STATS
-    local c3 = Instance.new("Frame")
-    c3.Size = UDim2.new(0, 225, 0, 230)
-    c3.Position = UDim2.new(0, 482, 0, 42)
+    local c3 = Instance.new("ScrollingFrame")
+    c3.Name = "Col3"
+    c3.Size = UDim2.new(0, 218, 0, 250)
+    c3.Position = UDim2.new(0, 454, 0, 42)
     c3.BackgroundColor3 = Color3.fromRGB(20, 20, 28)
     c3.BorderSizePixel = 0
+    c3.ScrollBarThickness = 4
+    c3.CanvasSize = UDim2.new(0, 0, 0, 220)
     c3.Parent = mf
     local c3c = Instance.new("UICorner"); c3c.CornerRadius = UDim.new(0, 8); c3c.Parent = c3
     
@@ -651,15 +721,15 @@ local function createGUI()
     c3t.Size = UDim2.new(1, -16, 0, 22)
     c3t.Position = UDim2.new(0, 8, 0, 6)
     c3t.BackgroundTransparency = 1
-    c3t.Text = "MOVEMENT + STATS"
+    c3t.Text = "STATS + MOVE"
     c3t.TextColor3 = Color3.fromRGB(0, 200, 255)
     c3t.TextSize = 14
     c3t.Font = Enum.Font.GothamBold
     c3t.TextXAlignment = Enum.TextXAlignment.Left
     c3t.Parent = c3
     
-    GUI_REFS.Buttons.speed = mkBtn(c3, "Speed", "SPEED BOOST: OFF", 34, 28, Color3.fromRGB(0, 110, 180))
-    GUI_REFS.Buttons.jump = mkBtn(c3, "Jump", "JUMP BOOST: OFF", 66, 28, Color3.fromRGB(0, 110, 180))
+    GUI_REFS.Buttons.speed = mkBtn(c3, "Speed", "SPEED: OFF", 32, 28, Color3.fromRGB(0, 110, 180))
+    GUI_REFS.Buttons.jump = mkBtn(c3, "Jump", "JUMP: OFF", 64, 28, Color3.fromRGB(0, 110, 180))
     
     local function mkLbl(n, y, col, size)
         local l = Instance.new("TextLabel")
@@ -675,48 +745,44 @@ local function createGUI()
         return l
     end
     
-    GUI_REFS.Labels.harvested = mkLbl("Harvested", 102, Color3.fromRGB(0, 220, 130))
-    GUI_REFS.Labels.killed    = mkLbl("Killed", 120, Color3.fromRGB(240, 120, 120))
-    GUI_REFS.Labels.herbs     = mkLbl("Herbs in Map", 138, Color3.fromRGB(140, 220, 140))
-    GUI_REFS.Labels.enemies   = mkLbl("Enemies in Map", 156, Color3.fromRGB(255, 150, 150))
-    GUI_REFS.Labels.status    = mkLbl("Status", 178, Color3.fromRGB(0, 220, 130), 12)
+    GUI_REFS.Labels.harvested = mkLbl("Harvested", 98, Color3.fromRGB(0, 220, 130))
+    GUI_REFS.Labels.killed    = mkLbl("Killed", 116, Color3.fromRGB(240, 120, 120))
+    GUI_REFS.Labels.herbs     = mkLbl("Herbs in Map", 134, Color3.fromRGB(140, 220, 140))
+    GUI_REFS.Labels.enemies   = mkLbl("Enemies in Map", 152, Color3.fromRGB(255, 150, 150))
+    GUI_REFS.Labels.status    = mkLbl("Status", 174, Color3.fromRGB(0, 220, 130), 12)
     GUI_REFS.Labels.status.Text = "Status: IDLE"
     
     local cr = Instance.new("TextLabel")
     cr.Size = UDim2.new(1, -16, 0, 20)
-    cr.Position = UDim2.new(0, 8, 1, -26)
+    cr.Position = UDim2.new(0, 8, 0, 196)
     cr.BackgroundTransparency = 1
-    cr.Text = "Script Created by ADIEL"
+    cr.Text = "Created by ADIEL"
     cr.TextColor3 = Color3.fromRGB(100, 100, 130)
     cr.TextSize = 10
     cr.Font = Enum.Font.Gotham
     cr.TextXAlignment = Enum.TextXAlignment.Left
     cr.Parent = c3
-end
-
---==============================================================================
--- DRAGGABLE
---==============================================================================
-local function makeDraggable(frame, handle)
-    if not frame or not handle then return end
-    local dragging, dragStart, startPos = false, nil, nil
-    handle.InputBegan:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1
-            or input.UserInputType == Enum.UserInputType.Touch then
-            dragging = true
-            dragStart = input.Position
-            startPos = frame.Position
-            input.Changed:Connect(function()
-                if input.UserInputState == Enum.UserInputState.End then dragging = false end
-            end)
-        end
-    end)
-    UserInputService.InputChanged:Connect(function(input)
-        if dragging then
-            local d = input.Position - dragStart
-            frame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X, startPos.Y.Scale, startPos.Y.Offset + d.Y)
-        end
-    end)
+    
+    -- =============================================================
+    -- FLOATING BUBBLE (buat balikin GUI)
+    -- =============================================================
+    local bubble = Instance.new("TextButton")
+    bubble.Name = "FloatingBubble"
+    bubble.Size = UDim2.new(0, 55, 0, 55)
+    bubble.Position = UDim2.new(0, 20, 0.4, 0)
+    bubble.BackgroundColor3 = Color3.fromRGB(120, 60, 180)
+    bubble.BorderSizePixel = 0
+    bubble.Text = "XGM"
+    bubble.TextColor3 = Color3.fromRGB(240, 240, 240)
+    bubble.TextSize = 14
+    bubble.Font = Enum.Font.GothamBold
+    bubble.Visible = false
+    bubble.Active = true
+    bubble.ZIndex = 100
+    bubble.Parent = sg
+    GUI_REFS.Bubble = bubble
+    local bbc = Instance.new("UICorner"); bbc.CornerRadius = UDim.new(1, 0); bbc.Parent = bubble
+    local bbs = Instance.new("UIStroke"); bbs.Color = Color3.fromRGB(200, 130, 255); bbs.Thickness = 2; bbs.Parent = bubble
 end
 
 --==============================================================================
@@ -796,12 +862,12 @@ local function bindEvents()
     GUI_REFS.Buttons.autoFarm.MouseButton1Click:Connect(function()
         if STATE.autoFarm then
             stopAutoFarm()
-            GUI_REFS.Buttons.autoFarm.Text = "AUTO FARM LOOP: OFF"
+            GUI_REFS.Buttons.autoFarm.Text = "AUTO FARM: OFF"
             GUI_REFS.Buttons.autoFarm.BackgroundColor3 = Color3.fromRGB(80, 60, 160)
         else
             STATE.autoFarm = true
             startAutoFarm()
-            GUI_REFS.Buttons.autoFarm.Text = "AUTO FARM LOOP: ON"
+            GUI_REFS.Buttons.autoFarm.Text = "AUTO FARM: ON"
             GUI_REFS.Buttons.autoFarm.BackgroundColor3 = Color3.fromRGB(130, 90, 220)
         end
     end)
@@ -860,22 +926,17 @@ local function bindEvents()
     
     GUI_REFS.Buttons.scanCombat.MouseButton1Click:Connect(function()
         local enemies = getAllEnemies()
-        log("Enemies ditemukan: " .. tostring(#enemies), "info")
-        for i, e in ipairs(enemies) do
-            if i <= 5 then
-                log("  " .. e.obj.Name .. " | HP: " .. tostring(math.floor(e.humanoid.Health)) .. "/" .. tostring(math.floor(e.humanoid.MaxHealth)), "info")
-            end
-        end
+        log("Enemies: " .. tostring(#enemies), "info")
     end)
     
     GUI_REFS.Buttons.speed.MouseButton1Click:Connect(function()
         STATE.speedBoost = not STATE.speedBoost
         applySpeedJump()
         if STATE.speedBoost then
-            GUI_REFS.Buttons.speed.Text = "SPEED BOOST: ON"
+            GUI_REFS.Buttons.speed.Text = "SPEED: ON"
             GUI_REFS.Buttons.speed.BackgroundColor3 = Color3.fromRGB(0, 180, 90)
         else
-            GUI_REFS.Buttons.speed.Text = "SPEED BOOST: OFF"
+            GUI_REFS.Buttons.speed.Text = "SPEED: OFF"
             GUI_REFS.Buttons.speed.BackgroundColor3 = Color3.fromRGB(0, 110, 180)
         end
     end)
@@ -884,20 +945,27 @@ local function bindEvents()
         STATE.jumpBoost = not STATE.jumpBoost
         applySpeedJump()
         if STATE.jumpBoost then
-            GUI_REFS.Buttons.jump.Text = "JUMP BOOST: ON"
+            GUI_REFS.Buttons.jump.Text = "JUMP: ON"
             GUI_REFS.Buttons.jump.BackgroundColor3 = Color3.fromRGB(0, 180, 90)
         else
-            GUI_REFS.Buttons.jump.Text = "JUMP BOOST: OFF"
+            GUI_REFS.Buttons.jump.Text = "JUMP: OFF"
             GUI_REFS.Buttons.jump.BackgroundColor3 = Color3.fromRGB(0, 110, 180)
         end
     end)
     
+    -- MINIMIZE -> BUBBLE
     GUI_REFS.Buttons.minBtn.MouseButton1Click:Connect(function()
-        GUI_REFS.MainFrame.Visible = false
+        minimizeGUI()
     end)
     
+    -- CLOSE -> BUBBLE (BUKAN HILANG)
     GUI_REFS.Buttons.closeBtn.MouseButton1Click:Connect(function()
-        GUI_REFS.ScreenGui:Destroy()
+        minimizeGUI()
+    end)
+    
+    -- BUBBLE CLICK -> RESTORE GUI
+    GUI_REFS.Bubble.MouseButton1Click:Connect(function()
+        restoreGUI()
     end)
 end
 
@@ -924,17 +992,21 @@ local function init()
         task.wait(2)
         updateCharacterRefs()
         applySpeedJump()
-        log("Character respawn - refs updated", "info")
     end)
     
     createGUI()
-    makeDraggable(GUI_REFS.MainFrame, GUI_REFS.MainFrame:FindFirstChild("TitleBar"))
+    
+    -- DRAG HANDLERS
+    local titleBar = GUI_REFS.MainFrame:FindFirstChild("TitleBar")
+    makeDraggable(GUI_REFS.MainFrame, titleBar)
+    makeDraggable(GUI_REFS.Bubble, GUI_REFS.Bubble)
+    
     bindEvents()
     startStatsUpdater()
     setupAntiAFK()
     
-    log("Script Created by ADIEL - Xianxia God Mode v1.0", "success")
-    log("Tags detected: Herbs=" .. tostring(#getAllHerbs()) .. " | Enemy=" .. tostring(#getAllEnemies()), "info")
+    log("Script Created by ADIEL - v1.1 FIXED GUI", "success")
+    log("Herbs: " .. tostring(#getAllHerbs()) .. " | Enemy: " .. tostring(#getAllEnemies()), "info")
 end
 
 init()
