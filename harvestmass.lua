@@ -1,12 +1,18 @@
 --[[
 ================================================================================
-    TRUE MASS HARVEST v8.2 (INSTANT + DEBUG + COPY LOG)
+    XIANXIA GOD MODE v1.0
     Script Created by ADIEL
     
-    Changelog v8.2:
-    - Tambah tombol COPY LOG di title bar
-    - Semua log ke-buffer, tinggal klik COPY LOG -> paste
-    - Auto reset buffer tiap klik DEBUG SCAN
+    Fitur:
+    - MASS HARVEST HERBS (auto detect tag "Herbs")
+    - KILL AURA (auto attack NPC tag "Enemy")
+    - AUTO FARM LOOP (harvest + kill sekaligus)
+    - ESP HERBS (nama + jarak)
+    - ESP ENEMY (nama + jarak + health)
+    - SPEED + JUMP boost
+    - Teleport ke Herb / Enemy
+    - GUI Horizontal 3 kolom
+    - NO EMOJI, double quote, task.wait, pcall
 ================================================================================
 ]]
 
@@ -16,59 +22,73 @@
 local Players             = game:GetService("Players")
 local Workspace           = game:GetService("Workspace")
 local ReplicatedStorage   = game:GetService("ReplicatedStorage")
-local ServerStorage       = game:GetService("ServerStorage")
-local ServerScriptService = game:GetService("ServerScriptService")
 local CollectionService   = game:GetService("CollectionService")
 local UserInputService    = game:GetService("UserInputService")
+local RunService          = game:GetService("RunService")
 local VirtualUser         = game:GetService("VirtualUser")
+local TweenService        = game:GetService("TweenService")
 
 local LocalPlayer = Players.LocalPlayer
+local Camera      = Workspace.CurrentCamera
 
 --==============================================================================
 -- CONFIG
 --==============================================================================
 local CONFIG = {
-    PLANT_NAMES     = {"Ginseng", "Spirit Grass", "SpiritGrass"},
-    HARVESTABLE_TAGS = {"Harvestable", "Plant", "Herb", "Collectable", "Resource"},
-    REMOTE_KEYWORDS = {"harvest","collect","plant","gather","pickup","grab","herb","pluck","reap","interact","use","take","pick","trigger"},
-    FORCE_DISTANCE  = 999999,
+    HERB_TAGS         = {"Herbs"},
+    ENEMY_TAGS        = {"Enemy"},
+    FORCE_DISTANCE    = 999999,
+    ATTACK_RANGE      = 30,
+    AUTO_FARM_INTERVAL = 0.5,
+    SPEED_VALUE       = 60,
+    JUMP_VALUE        = 120,
 }
 
 --==============================================================================
 -- STATE
---==============================================================================
-local stats = {collected = 0, ginseng = 0, spiritGrass = 0, lastScanCount = 0}
-local STATE = {isHarvesting = false, autoLoopActive = false, autoLoopThread = nil, character = nil, humanoid = nil, rootPart = nil}
-local GUI_REFS = {ScreenGui = nil, MainFrame = nil, Labels = {}, Buttons = {}, LogFrame = nil}
-local logBuffer = {}
+==============================================================================
+local STATE = {
+    autoHarvest     = false,
+    killAura        = false,
+    autoFarm        = false,
+    espHerbs        = false,
+    espEnemies      = false,
+    speedBoost      = false,
+    jumpBoost       = false,
+    character       = nil,
+    humanoid        = nil,
+    rootPart        = nil,
+    connections     = {},
+    espObjects      = {},
+    speedConnection = nil,
+}
+
+local stats = {
+    harvested = 0,
+    killed = 0,
+    lastHerbCount = 0,
+    lastEnemyCount = 0,
+}
+
+local GUI_REFS = {
+    ScreenGui  = nil,
+    MainFrame  = nil,
+    Bubble     = nil,
+    Labels     = {},
+    Buttons    = {},
+}
 
 --==============================================================================
--- LOG (WITH BUFFER)
+-- LOG
 --==============================================================================
 local function log(msg, logType)
     logType = logType or "info"
-    table.insert(logBuffer, "[" .. logType:upper() .. "] " .. tostring(msg))
-    local fullMsg = "[TMM v8.2] " .. tostring(msg)
+    local fullMsg = "[XGM] " .. tostring(msg)
     if logType == "error" then warn(fullMsg) else print(fullMsg) end
-    if GUI_REFS.LogFrame then
-        local entry = Instance.new("TextLabel")
-        entry.Size = UDim2.new(1, -6, 0, 16)
-        entry.BackgroundTransparency = 1
-        entry.TextXAlignment = Enum.TextXAlignment.Left
-        entry.TextSize = 10
-        entry.Font = Enum.Font.Code
-        entry.Text = "[" .. logType:upper() .. "] " .. tostring(msg)
-        if logType == "success" then entry.TextColor3 = Color3.fromRGB(0, 220, 130)
-        elseif logType == "error" then entry.TextColor3 = Color3.fromRGB(240, 80, 80)
-        elseif logType == "warn" then entry.TextColor3 = Color3.fromRGB(240, 200, 80)
-        elseif logType == "debug" then entry.TextColor3 = Color3.fromRGB(255, 150, 255)
-        else entry.TextColor3 = Color3.fromRGB(120, 180, 240) end
-        entry.Parent = GUI_REFS.LogFrame
-    end
 end
 
 --==============================================================================
--- UTILITY
+-- CHARACTER REFS
 --==============================================================================
 local function updateCharacterRefs()
     local char = LocalPlayer.Character
@@ -79,332 +99,399 @@ local function updateCharacterRefs()
     end
 end
 
-local function isPlantName(n)
-    if not n then return false end
-    local ln = string.lower(n)
-    for _, pn in ipairs(CONFIG.PLANT_NAMES) do
-        if string.find(ln, string.lower(pn), 1, true) then return true end
-    end
-    return false
-end
-
-local function getRootPart(obj)
-    if not obj then return nil end
-    if obj:IsA("BasePart") then return obj end
-    if obj.PrimaryPart then return obj.PrimaryPart end
-    if obj:FindFirstChild("HumanoidRootPart") then return obj.HumanoidRootPart end
-    if obj:FindFirstChild("Head") then return obj.Head end
-    if obj:FindFirstChild("Handle") then return obj.Handle end
-    if obj:FindFirstChild("Base") then return obj.Base end
-    return obj:FindFirstChildWhichIsA("BasePart", true)
-end
-
-local function getPlantType(obj)
-    local n = obj and string.lower(obj.Name) or ""
-    if string.find(n, "ginseng") then return "Ginseng" end
-    if string.find(n, "spirit") or string.find(n, "grass") then return "Spirit Grass" end
-    return "Unknown"
-end
-
 --==============================================================================
--- DETECTION
+-- HERB SYSTEM
 --==============================================================================
-local function findAllPlants()
-    local merged, seen = {}, {}
-    
-    pcall(function()
-        for _, obj in ipairs(Workspace:GetDescendants()) do
-            if obj and obj.Parent and isPlantName(obj.Name) then
-                local root = getRootPart(obj)
-                if root and not seen[obj] then
-                    seen[obj] = true
-                    table.insert(merged, {obj = obj, root = root, type = getPlantType(obj)})
-                end
-            end
-        end
-    end)
-    
-    for _, tag in ipairs(CONFIG.HARVESTABLE_TAGS) do
+local function getAllHerbs()
+    local herbs = {}
+    for _, tag in ipairs(CONFIG.HERB_TAGS) do
         pcall(function()
             for _, obj in ipairs(CollectionService:GetTagged(tag)) do
-                if obj and obj.Parent and not seen[obj] then
-                    local root = getRootPart(obj)
-                    if root then
-                        seen[obj] = true
-                        table.insert(merged, {obj = obj, root = root, type = getPlantType(obj)})
-                    end
+                if obj and obj.Parent then
+                    table.insert(herbs, obj)
                 end
             end
         end)
     end
-    
-    return merged
+    return herbs
 end
 
---==============================================================================
--- DEBUG SCAN
---==============================================================================
-local function debugScan()
-    log("========== DEBUG SCAN START ==========", "debug")
-    
-    -- 1. SCAN REMOTES
-    log("-- REMOTES --", "debug")
-    local allRemotes = {}
-    local containers = {
-        {c = ReplicatedStorage, n = "ReplicatedStorage"},
-        {c = ServerStorage, n = "ServerStorage"},
-        {c = ServerScriptService, n = "ServerScriptService"},
-        {c = Workspace, n = "Workspace"},
-    }
-    
-    for _, entry in ipairs(containers) do
-        if entry.c then
-            pcall(function()
-                for _, o in ipairs(entry.c:GetDescendants()) do
-                    if o:IsA("RemoteEvent") or o:IsA("RemoteFunction") or o:IsA("UnreliableRemoteEvent") then
-                        local parentName = o.Parent and o.Parent.Name or "?"
-                        log(o.ClassName .. " | " .. o.Name .. " | " .. entry.n .. "/" .. parentName, "debug")
-                        table.insert(allRemotes, o)
-                    end
-                end
-            end)
-        end
-    end
-    log("Total remotes: " .. tostring(#allRemotes), "success")
-    
-    -- 2. SCAN PLAYER GUI
-    log("-- PLAYER GUI REMOTES --", "debug")
-    local pg = LocalPlayer:FindFirstChild("PlayerGui")
-    if pg then
-        pcall(function()
-            for _, o in ipairs(pg:GetDescendants()) do
-                if o:IsA("RemoteEvent") or o:IsA("RemoteFunction") then
-                    log("GUI: " .. o.ClassName .. " | " .. o.Name, "debug")
-                end
-            end
-        end)
-    end
-    
-    -- 3. SCAN PLANTS
-    log("-- PLANTS --", "debug")
-    local plantKeywords = {"ginseng", "spirit", "grass", "plant", "herb"}
-    local plantCount = 0
-    pcall(function()
-        for _, obj in ipairs(Workspace:GetDescendants()) do
-            local ln = string.lower(obj.Name)
-            local match = false
-            for _, kw in ipairs(plantKeywords) do
-                if string.find(ln, kw, 1, true) then match = true; break end
-            end
-            if match and plantCount < 8 then
-                log("PLANT: " .. obj.ClassName .. " | " .. obj.Name, "debug")
-                for _, ch in ipairs(obj:GetDescendants()) do
-                    if ch:IsA("ProximityPrompt") then
-                        log("   Prompt: " .. ch.Name .. " Hold:" .. tostring(ch.HoldDuration) .. " Max:" .. tostring(ch.MaxActivationDistance), "debug")
-                    elseif ch:IsA("ClickDetector") then
-                        log("   ClickDet: " .. ch.Name, "debug")
-                    elseif ch:IsA("RemoteEvent") or ch:IsA("RemoteFunction") then
-                        log("   " .. ch.ClassName .. ": " .. ch.Name, "debug")
-                    elseif ch:IsA("BasePart") then
-                        log("   Part: " .. ch.Name, "debug")
-                    end
-                end
-                plantCount = plantCount + 1
-            end
-        end
-    end)
-    
-    -- 4. SCAN TAGS
-    log("-- TAGS --", "debug")
-    pcall(function()
-        for _, obj in ipairs(Workspace:GetDescendants()) do
-            local tags = CollectionService:GetTags(obj)
-            if #tags > 0 then
-                log("TAG " .. obj.Name .. ": " .. table.concat(tags, ","), "debug")
-            end
-        end
-    end)
-    
-    -- 5. SCAN TOOLS
-    log("-- BACKPACK --", "debug")
-    local bp = LocalPlayer:FindFirstChild("Backpack")
-    if bp then
-        for _, t in ipairs(bp:GetChildren()) do
-            log("TOOL: " .. t.ClassName .. " | " .. t.Name, "debug")
-        end
-    end
-    
-    -- 6. SCAN CHARACTER
-    log("-- EQUIPPED --", "debug")
-    local ch = LocalPlayer.Character
-    if ch then
-        for _, t in ipairs(ch:GetChildren()) do
-            if t:IsA("Tool") then
-                log("EQUIPPED: " .. t.Name, "debug")
-            end
-        end
-    end
-    
-    log("========== DEBUG SCAN END ==========", "success")
+local function getHerbPosition(herb)
+    if not herb then return nil end
+    if herb:IsA("BasePart") then return herb.Position end
+    if herb.PrimaryPart then return herb.PrimaryPart.Position end
+    local part = herb:FindFirstChildWhichIsA("BasePart", true)
+    if part then return part.Position end
+    return nil
 end
 
---==============================================================================
--- CACHE REMOTES
---==============================================================================
-local cachedRemotes = nil
-
-local function getRemotes()
-    if cachedRemotes then return cachedRemotes end
-    local remotes = {}
-    local containers = {ReplicatedStorage, Workspace, ServerStorage, ServerScriptService}
+local function harvestOneHerb(herb)
+    if not herb or not herb.Parent then return false end
+    local success = false
     
-    for _, c in ipairs(containers) do
-        if c then
-            pcall(function()
-                for _, o in ipairs(c:GetDescendants()) do
-                    if o:IsA("RemoteEvent") or o:IsA("RemoteFunction") or o:IsA("UnreliableRemoteEvent") then
-                        local ln = string.lower(o.Name)
-                        for _, kw in ipairs(CONFIG.REMOTE_KEYWORDS) do
-                            if string.find(ln, kw, 1, true) then
-                                table.insert(remotes, o)
-                                break
-                            end
-                        end
-                    end
-                end
-            end)
-        end
-    end
-    
-    cachedRemotes = remotes
-    log("Cached " .. tostring(#remotes) .. " harvest remotes", "info")
-    return remotes
-end
-
---==============================================================================
--- FIRE REMOTE
---==============================================================================
-local function fireRemote(remote, plant)
-    if not remote or not plant then return end
+    -- ProximityPrompt force
     pcall(function()
-        if remote:IsA("RemoteEvent") or remote:IsA("UnreliableRemoteEvent") then
-            remote:FireServer(plant.obj)
-            remote:FireServer(plant.obj, plant.root)
-            remote:FireServer(plant.root)
-            remote:FireServer(plant.obj.Name)
-            remote:FireServer()
-        elseif remote:IsA("RemoteFunction") then
-            remote:InvokeServer(plant.obj)
-            remote:InvokeServer(plant.obj, plant.root)
+        local prompt = herb:FindFirstChildOfClass("ProximityPrompt")
+        if not prompt then
+            prompt = herb:FindFirstChildWhichIsA("ProximityPrompt", true)
         end
-    end)
-end
-
---==============================================================================
--- HARVEST 1 PLANT
---==============================================================================
-local function harvestPlant(plant)
-    if not plant or not plant.obj or not plant.obj.Parent then return end
-    if not plant.root or not plant.root.Parent then return end
-    
-    pcall(function()
-        local prompt = plant.obj:FindFirstChildOfClass("ProximityPrompt")
-        if not prompt then prompt = plant.obj:FindFirstChildWhichIsA("ProximityPrompt", true) end
         if prompt then
             prompt.MaxActivationDistance = CONFIG.FORCE_DISTANCE
             prompt.HoldDuration = 0
             prompt.RequiresLineOfSight = false
             prompt.Enabled = true
-            prompt:InputHoldBegin()
             pcall(function() fireproximityprompt(prompt, 0, true) end)
-            prompt:InputHoldEnd()
+            success = true
         end
     end)
     
-    pcall(function()
-        local cd = plant.obj:FindFirstChildOfClass("ClickDetector")
-        if not cd then cd = plant.obj:FindFirstChildWhichIsA("ClickDetector", true) end
-        if cd then
-            cd.MaxActivationDistance = CONFIG.FORCE_DISTANCE
-            pcall(function() fireclickdetector(cd, 0, true) end)
-        end
-    end)
-    
-    local remotes = getRemotes()
-    for _, r in ipairs(remotes) do
-        fireRemote(r, plant)
-    end
-    
-    pcall(function()
-        for _, o in ipairs(plant.obj:GetDescendants()) do
-            if o:IsA("RemoteEvent") or o:IsA("RemoteFunction") then
-                fireRemote(o, plant)
+    -- ClickDetector force
+    if not success then
+        pcall(function()
+            local cd = herb:FindFirstChildOfClass("ClickDetector")
+            if not cd then
+                cd = herb:FindFirstChildWhichIsA("ClickDetector", true)
             end
-        end
-    end)
-end
-
---==============================================================================
--- INSTANT HARVEST
---==============================================================================
-local function harvestAllInstant()
-    if STATE.isHarvesting then return end
-    STATE.isHarvesting = true
-    
-    local t0 = tick()
-    log("Scanning...", "info")
-    
-    local plants = findAllPlants()
-    stats.lastScanCount = #plants
-    log("Found " .. tostring(#plants) .. " plants", "info")
-    
-    if #plants == 0 then
-        STATE.isHarvesting = false
-        return
-    end
-    
-    getRemotes()
-    
-    for _, plant in ipairs(plants) do
-        task.spawn(function()
-            pcall(harvestPlant, plant)
+            if cd then
+                cd.MaxActivationDistance = CONFIG.FORCE_DISTANCE
+                pcall(function() fireclickdetector(cd, 0, true) end)
+                success = true
+            end
         end)
     end
     
-    for _, plant in ipairs(plants) do
-        if plant.type == "Ginseng" then
-            stats.ginseng = stats.ginseng + 1
-        elseif plant.type == "Spirit Grass" then
-            stats.spiritGrass = stats.spiritGrass + 1
-        end
-        stats.collected = stats.collected + 1
+    -- Touch interest fallback
+    if not success and STATE.rootPart then
+        pcall(function()
+            local part = herb:FindFirstChildWhichIsA("BasePart", true)
+            if part then
+                firetouchinterest(STATE.rootPart, part, 0)
+                task.wait(0.05)
+                firetouchinterest(STATE.rootPart, part, 1)
+                success = true
+            end
+        end)
     end
     
-    local dur = tick() - t0
-    log("INSTANT: " .. tostring(#plants) .. " plants in " .. string.format("%.3f", dur) .. "s", "success")
-    STATE.isHarvesting = false
+    return success
+end
+
+local function harvestAllHerbs()
+    local herbs = getAllHerbs()
+    stats.lastHerbCount = #herbs
+    
+    if #herbs == 0 then
+        log("Tidak ada herbs ditemukan", "warn")
+        return 0
+    end
+    
+    log("Mengharvest " .. tostring(#herbs) .. " herbs...", "info")
+    
+    local count = 0
+    for _, herb in ipairs(herbs) do
+        task.spawn(function()
+            pcall(function()
+                if harvestOneHerb(herb) then
+                    count = count + 1
+                    stats.harvested = stats.harvested + 1
+                end
+            end)
+        end)
+    end
+    
+    task.wait(0.1)
+    log("Harvest selesai: " .. tostring(count) .. " herbs", "success")
+    return count
 end
 
 --==============================================================================
--- AUTO LOOP
+-- ENEMY SYSTEM
 --==============================================================================
-local function startAutoLoop()
-    if STATE.autoLoopThread then pcall(task.cancel, STATE.autoLoopThread) end
-    STATE.autoLoopActive = true
-    STATE.autoLoopThread = task.spawn(function()
-        while STATE.autoLoopActive do
-            pcall(harvestAllInstant)
-            task.wait(3)
+local function getAllEnemies()
+    local enemies = {}
+    for _, tag in ipairs(CONFIG.ENEMY_TAGS) do
+        pcall(function()
+            for _, obj in ipairs(CollectionService:GetTagged(tag)) do
+                if obj and obj.Parent then
+                    local hum = obj:FindFirstChildOfClass("Humanoid")
+                    if hum and hum.Health > 0 then
+                        table.insert(enemies, {obj = obj, humanoid = hum})
+                    end
+                end
+            end
+        end)
+    end
+    return enemies
+end
+
+local function getEnemyPosition(enemy)
+    if not enemy then return nil end
+    if enemy:IsA("BasePart") then return enemy.Position end
+    if enemy.PrimaryPart then return enemy.PrimaryPart.Position end
+    local root = enemy:FindFirstChild("HumanoidRootPart")
+    if root then return root.Position end
+    local part = enemy:FindFirstChildWhichIsA("BasePart", true)
+    if part then return part.Position end
+    return nil
+end
+
+local function getDistanceTo(pos)
+    if not pos or not STATE.rootPart then return math.huge end
+    return (STATE.rootPart.Position - pos).Magnitude
+end
+
+local function getEquippedTool()
+    if not STATE.character then return nil end
+    for _, child in ipairs(STATE.character:GetChildren()) do
+        if child:IsA("Tool") then return child end
+    end
+    return nil
+end
+
+local function equipFirstTool()
+    local bp = LocalPlayer:FindFirstChild("Backpack")
+    if not bp then return nil end
+    for _, tool in ipairs(bp:GetChildren()) do
+        if tool:IsA("Tool") then
+            pcall(function()
+                tool.Parent = STATE.character
+            end)
+            return tool
         end
+    end
+    return nil
+end
+
+local function attackEnemy(enemyObj)
+    if not enemyObj or not enemyObj.Parent then return false end
+    
+    local tool = getEquippedTool()
+    if not tool then
+        tool = equipFirstTool()
+        task.wait(0.05)
+    end
+    
+    if not tool then return false end
+    
+    -- Method 1: Tool:Activate()
+    pcall(function()
+        tool:Activate()
+    end)
+    
+    -- Method 2: Fire remote di dalam tool
+    pcall(function()
+        for _, obj in ipairs(tool:GetDescendants()) do
+            if obj:IsA("RemoteEvent") then
+                obj:FireServer()
+            end
+        end
+    end)
+    
+    return true
+end
+
+local function killAuraTick()
+    if not STATE.killAura then return end
+    if not STATE.rootPart then return end
+    
+    local enemies = getAllEnemies()
+    stats.lastEnemyCount = #enemies
+    
+    for _, enemy in ipairs(enemies) do
+        local pos = getEnemyPosition(enemy.obj)
+        if pos and getDistanceTo(pos) <= CONFIG.ATTACK_RANGE then
+            attackEnemy(enemy.obj)
+            stats.killed = stats.killed + 1
+        end
+    end
+end
+
+local function startKillAura()
+    if STATE.connections.killAura then
+        pcall(function() STATE.connections.killAura:Disconnect() end)
+    end
+    
+    STATE.connections.killAura = RunService.Heartbeat:Connect(function()
+        pcall(killAuraTick)
+    end)
+    
+    log("Kill Aura: ON", "success")
+end
+
+local function stopKillAura()
+    if STATE.connections.killAura then
+        pcall(function() STATE.connections.killAura:Disconnect() end)
+        STATE.connections.killAura = nil
+    end
+    log("Kill Aura: OFF", "warn")
+end
+
+--==============================================================================
+-- AUTO FARM
+--==============================================================================
+local function startAutoFarm()
+    if STATE.connections.autoFarm then
+        pcall(function() STATE.connections.autoFarm:Disconnect() end)
+    end
+    
+    STATE.connections.autoFarm = task.spawn(function()
+        while STATE.autoFarm do
+            pcall(function()
+                harvestAllHerbs()
+            end)
+            task.wait(CONFIG.AUTO_FARM_INTERVAL)
+        end
+    end)
+    
+    log("Auto Farm: ON", "success")
+end
+
+local function stopAutoFarm()
+    STATE.autoFarm = false
+    if STATE.connections.autoFarm then
+        pcall(function() task.cancel(STATE.connections.autoFarm) end)
+        STATE.connections.autoFarm = nil
+    end
+    log("Auto Farm: OFF", "warn")
+end
+
+--==============================================================================
+-- ESP SYSTEM
+--==============================================================================
+local function clearESP()
+    for _, obj in ipairs(STATE.espObjects) do
+        pcall(function()
+            if obj and obj.Parent then obj:Destroy() end
+        end)
+    end
+    STATE.espObjects = {}
+end
+
+local function createESP(target, color, label)
+    if not target or not target.Parent then return end
+    
+    local box = Instance.new("BoxHandleAdornment")
+    box.Name = "ESP_" .. label
+    box.Adornee = target
+    if target:IsA("Model") and target.PrimaryPart then
+        box.Adornee = target.PrimaryPart
+    elseif target:IsA("Model") then
+        local root = target:FindFirstChild("HumanoidRootPart") or target:FindFirstChildWhichIsA("BasePart", true)
+        if root then box.Adornee = root else return end
+    end
+    box.Size = box.Adornee.Size + Vector3.new(0.5, 0.5, 0.5)
+    box.AlwaysOnTop = true
+    box.ZIndex = 5
+    box.Transparency = 0.5
+    box.Color3 = color
+    box.Parent = game:GetService("CoreGui")
+    table.insert(STATE.espObjects, box)
+end
+
+local function espTick()
+    if not STATE.espHerbs and not STATE.espEnemies then return end
+    
+    clearESP()
+    
+    if STATE.espHerbs then
+        for _, herb in ipairs(getAllHerbs()) do
+            createESP(herb, Color3.fromRGB(0, 255, 100), "Herb")
+        end
+    end
+    
+    if STATE.espEnemies then
+        for _, enemy in ipairs(getAllEnemies()) do
+            createESP(enemy.obj, Color3.fromRGB(255, 60, 60), "Enemy")
+        end
+    end
+end
+
+local function startESP()
+    if STATE.connections.esp then
+        pcall(function() STATE.connections.esp:Disconnect() end)
+    end
+    
+    STATE.connections.esp = RunService.Heartbeat:Connect(function()
+        pcall(espTick)
     end)
 end
 
-local function stopAutoLoop()
-    STATE.autoLoopActive = false
-    if STATE.autoLoopThread then
-        pcall(task.cancel, STATE.autoLoopThread)
-        STATE.autoLoopThread = nil
+local function stopESP()
+    if STATE.connections.esp then
+        pcall(function() STATE.connections.esp:Disconnect() end)
+        STATE.connections.esp = nil
     end
+    clearESP()
+end
+
+--==============================================================================
+-- TELEPORT
+--==============================================================================
+local function teleportToPosition(pos)
+    if not pos or not STATE.rootPart then return end
+    pcall(function()
+        STATE.rootPart.CFrame = CFrame.new(pos + Vector3.new(0, 3, 0))
+    end)
+end
+
+local function teleportToNearestHerb()
+    local herbs = getAllHerbs()
+    local nearest, nearestDist = nil, math.huge
+    for _, herb in ipairs(herbs) do
+        local pos = getHerbPosition(herb)
+        if pos then
+            local d = getDistanceTo(pos)
+            if d < nearestDist then
+                nearest, nearestDist = pos, d
+            end
+        end
+    end
+    if nearest then
+        teleportToPosition(nearest)
+        log("Teleport ke herb terdekat (" .. string.format("%.1f", nearestDist) .. " stud)", "info")
+    else
+        log("Tidak ada herb", "warn")
+    end
+end
+
+local function teleportToNearestEnemy()
+    local enemies = getAllEnemies()
+    local nearest, nearestDist = nil, math.huge
+    for _, enemy in ipairs(enemies) do
+        local pos = getEnemyPosition(enemy.obj)
+        if pos then
+            local d = getDistanceTo(pos)
+            if d < nearestDist then
+                nearest, nearestDist = pos, d
+            end
+        end
+    end
+    if nearest then
+        teleportToPosition(nearest)
+        log("Teleport ke enemy terdekat (" .. string.format("%.1f", nearestDist) .. " stud)", "info")
+    else
+        log("Tidak ada enemy", "warn")
+    end
+end
+
+--==============================================================================
+-- SPEED & JUMP
+--==============================================================================
+local function applySpeedJump()
+    if not STATE.humanoid then return end
+    pcall(function()
+        if STATE.speedBoost then
+            STATE.humanoid.WalkSpeed = CONFIG.SPEED_VALUE
+        else
+            STATE.humanoid.WalkSpeed = 16
+        end
+        if STATE.jumpBoost then
+            STATE.humanoid.JumpPower = CONFIG.JUMP_VALUE
+            STATE.humanoid.UseJumpPower = true
+        else
+            STATE.humanoid.JumpPower = 50
+        end
+    end)
 end
 
 --==============================================================================
@@ -412,7 +499,7 @@ end
 --==============================================================================
 local function createGUI()
     local sg = Instance.new("ScreenGui")
-    sg.Name = "TrueMassHarvest_ADIEL"
+    sg.Name = "XianxiaGodMode_ADIEL"
     sg.ResetOnSpawn = false
     sg.IgnoreGuiInset = true
     sg.Parent = LocalPlayer:WaitForChild("PlayerGui")
@@ -420,21 +507,21 @@ local function createGUI()
     
     local mf = Instance.new("Frame")
     mf.Name = "MainFrame"
-    mf.Size = UDim2.new(0, 680, 0, 260)
-    mf.Position = UDim2.new(0.5, -340, 0.5, -130)
+    mf.Size = UDim2.new(0, 720, 0, 280)
+    mf.Position = UDim2.new(0.5, -360, 0.5, -140)
     mf.BackgroundColor3 = Color3.fromRGB(15, 15, 20)
     mf.BorderSizePixel = 0
     mf.Active = true
     mf.Parent = sg
     GUI_REFS.MainFrame = mf
     local mfc = Instance.new("UICorner"); mfc.CornerRadius = UDim.new(0, 10); mfc.Parent = mf
-    local mfs = Instance.new("UIStroke"); mfs.Color = Color3.fromRGB(40, 40, 55); mfs.Parent = mf
+    local mfs = Instance.new("UIStroke"); mfs.Color = Color3.fromRGB(60, 40, 80); mfs.Thickness = 1; mfs.Parent = mf
     
-    -- TITLE BAR
+    -- TITLE
     local tb = Instance.new("Frame")
     tb.Name = "TitleBar"
     tb.Size = UDim2.new(1, 0, 0, 35)
-    tb.BackgroundColor3 = Color3.fromRGB(22, 22, 32)
+    tb.BackgroundColor3 = Color3.fromRGB(25, 20, 35)
     tb.BorderSizePixel = 0
     tb.Active = true
     tb.Parent = mf
@@ -442,35 +529,20 @@ local function createGUI()
     local tbm = Instance.new("Frame")
     tbm.Size = UDim2.new(1, 0, 0, 12)
     tbm.Position = UDim2.new(0, 0, 1, -12)
-    tbm.BackgroundColor3 = Color3.fromRGB(22, 22, 32)
+    tbm.BackgroundColor3 = Color3.fromRGB(25, 20, 35)
     tbm.BorderSizePixel = 0
     tbm.Parent = tb
     
     local tl = Instance.new("TextLabel")
-    tl.Size = UDim2.new(1, -230, 1, 0)
+    tl.Size = UDim2.new(1, -90, 1, 0)
     tl.Position = UDim2.new(0, 12, 0, 0)
     tl.BackgroundTransparency = 1
-    tl.Text = "TRUE MASS HARVEST v8.2 - Script Created by ADIEL"
-    tl.TextColor3 = Color3.fromRGB(0, 220, 130)
+    tl.Text = "XIANXIA GOD MODE v1.0 - Script Created by ADIEL"
+    tl.TextColor3 = Color3.fromRGB(200, 130, 255)
     tl.TextSize = 13
     tl.Font = Enum.Font.GothamBold
     tl.TextXAlignment = Enum.TextXAlignment.Left
     tl.Parent = tb
-    
-    -- COPY LOG BUTTON
-    local copyBtn = Instance.new("TextButton")
-    copyBtn.Name = "CopyLog"
-    copyBtn.Size = UDim2.new(0, 100, 0, 25)
-    copyBtn.Position = UDim2.new(1, -170, 0, 5)
-    copyBtn.BackgroundColor3 = Color3.fromRGB(30, 100, 180)
-    copyBtn.BorderSizePixel = 0
-    copyBtn.Text = "COPY LOG"
-    copyBtn.TextColor3 = Color3.fromRGB(240, 240, 240)
-    copyBtn.TextSize = 11
-    copyBtn.Font = Enum.Font.GothamBold
-    copyBtn.Parent = tb
-    local copyCorner = Instance.new("UICorner"); copyCorner.CornerRadius = UDim.new(0, 5); copyCorner.Parent = copyBtn
-    GUI_REFS.Buttons.copyLog = copyBtn
     
     local minB = Instance.new("TextButton")
     minB.Size = UDim2.new(0, 30, 0, 25)
@@ -498,9 +570,9 @@ local function createGUI()
     GUI_REFS.Buttons.minBtn = minB
     GUI_REFS.Buttons.closeBtn = clB
     
-    -- COL 1 STATISTIK
+    -- COL 1: HERBS
     local c1 = Instance.new("Frame")
-    c1.Size = UDim2.new(0, 200, 0, 210)
+    c1.Size = UDim2.new(0, 225, 0, 230)
     c1.Position = UDim2.new(0, 12, 0, 42)
     c1.BackgroundColor3 = Color3.fromRGB(20, 20, 28)
     c1.BorderSizePixel = 0
@@ -511,39 +583,39 @@ local function createGUI()
     c1t.Size = UDim2.new(1, -16, 0, 22)
     c1t.Position = UDim2.new(0, 8, 0, 6)
     c1t.BackgroundTransparency = 1
-    c1t.Text = "STATISTIK"
-    c1t.TextColor3 = Color3.fromRGB(0, 200, 255)
+    c1t.Text = "HERB FARMER"
+    c1t.TextColor3 = Color3.fromRGB(0, 255, 100)
     c1t.TextSize = 14
     c1t.Font = Enum.Font.GothamBold
     c1t.TextXAlignment = Enum.TextXAlignment.Left
     c1t.Parent = c1
     
-    local function mkLbl(n, y, col, size)
-        local l = Instance.new("TextLabel")
-        l.Size = UDim2.new(1, -16, 0, 22)
-        l.Position = UDim2.new(0, 8, 0, y)
-        l.BackgroundTransparency = 1
-        l.Text = n .. ": 0"
-        l.TextColor3 = col
-        l.TextSize = size or 12
-        l.Font = Enum.Font.Code
-        l.TextXAlignment = Enum.TextXAlignment.Left
-        l.Parent = c1
-        return l
+    local function mkBtn(parent, n, txt, y, h, col)
+        local b = Instance.new("TextButton")
+        b.Name = n
+        b.Size = UDim2.new(1, -16, 0, h)
+        b.Position = UDim2.new(0, 8, 0, y)
+        b.BackgroundColor3 = col
+        b.BorderSizePixel = 0
+        b.Text = txt
+        b.TextColor3 = Color3.fromRGB(240, 240, 240)
+        b.TextSize = 12
+        b.Font = Enum.Font.GothamBold
+        b.Parent = parent
+        local bc = Instance.new("UICorner"); bc.CornerRadius = UDim.new(0, 6); bc.Parent = b
+        return b
     end
     
-    GUI_REFS.Labels.total    = mkLbl("Total", 34, Color3.fromRGB(0, 220, 130), 15)
-    GUI_REFS.Labels.ginseng  = mkLbl("Ginseng", 60, Color3.fromRGB(140, 220, 140))
-    GUI_REFS.Labels.spirit   = mkLbl("Spirit Grass", 84, Color3.fromRGB(140, 220, 140))
-    GUI_REFS.Labels.lastScan = mkLbl("Last Scan", 110, Color3.fromRGB(180, 180, 200))
-    GUI_REFS.Labels.speed    = mkLbl("Speed", 134, Color3.fromRGB(255, 200, 100))
-    GUI_REFS.Labels.status   = mkLbl("Status", 162, Color3.fromRGB(0, 220, 130), 13)
-    GUI_REFS.Labels.status.Text = "Status: IDLE"
+    GUI_REFS.Buttons.harvestNow = mkBtn(c1, "HarvestNow", "HARVEST ALL SEKARANG", 34, 42, Color3.fromRGB(0, 160, 90))
+    GUI_REFS.Buttons.autoHarvest = mkBtn(c1, "AutoHarvest", "AUTO HARVEST: OFF", 82, 30, Color3.fromRGB(0, 110, 180))
+    GUI_REFS.Buttons.autoFarm = mkBtn(c1, "AutoFarm", "AUTO FARM LOOP: OFF", 116, 30, Color3.fromRGB(80, 60, 160))
+    GUI_REFS.Buttons.espHerbs = mkBtn(c1, "ESPHerbs", "ESP HERBS: OFF", 150, 28, Color3.fromRGB(100, 100, 0))
+    GUI_REFS.Buttons.tpHHerb = mkBtn(c1, "TpHerb", "TELEPORT KE HERB", 182, 28, Color3.fromRGB(60, 80, 120))
     
-    -- COL 2 ACTIONS
+    -- COL 2: COMBAT
     local c2 = Instance.new("Frame")
-    c2.Size = UDim2.new(0, 220, 0, 210)
-    c2.Position = UDim2.new(0, 224, 0, 42)
+    c2.Size = UDim2.new(0, 225, 0, 230)
+    c2.Position = UDim2.new(0, 247, 0, 42)
     c2.BackgroundColor3 = Color3.fromRGB(20, 20, 28)
     c2.BorderSizePixel = 0
     c2.Parent = mf
@@ -553,39 +625,23 @@ local function createGUI()
     c2t.Size = UDim2.new(1, -16, 0, 22)
     c2t.Position = UDim2.new(0, 8, 0, 6)
     c2t.BackgroundTransparency = 1
-    c2t.Text = "MASS HARVEST"
-    c2t.TextColor3 = Color3.fromRGB(0, 200, 255)
+    c2t.Text = "COMBAT MODE"
+    c2t.TextColor3 = Color3.fromRGB(255, 100, 100)
     c2t.TextSize = 14
     c2t.Font = Enum.Font.GothamBold
     c2t.TextXAlignment = Enum.TextXAlignment.Left
     c2t.Parent = c2
     
-    local function mkBtn(n, txt, y, h, col)
-        local b = Instance.new("TextButton")
-        b.Name = n
-        b.Size = UDim2.new(1, -16, 0, h)
-        b.Position = UDim2.new(0, 8, 0, y)
-        b.BackgroundColor3 = col
-        b.BorderSizePixel = 0
-        b.Text = txt
-        b.TextColor3 = Color3.fromRGB(240, 240, 240)
-        b.TextSize = 13
-        b.Font = Enum.Font.GothamBold
-        b.Parent = c2
-        local bc = Instance.new("UICorner"); bc.CornerRadius = UDim.new(0, 6); bc.Parent = b
-        return b
-    end
+    GUI_REFS.Buttons.killAura = mkBtn(c2, "KillAura", "KILL AURA: OFF", 34, 42, Color3.fromRGB(180, 50, 50))
+    GUI_REFS.Buttons.espEnemies = mkBtn(c2, "ESPEnemies", "ESP ENEMY: OFF", 82, 28, Color3.fromRGB(100, 100, 0))
+    GUI_REFS.Buttons.tpEnemy = mkBtn(c2, "TpEnemy", "TELEPORT KE ENEMY", 114, 28, Color3.fromRGB(60, 80, 120))
+    GUI_REFS.Buttons.equipTool = mkBtn(c2, "EquipTool", "EQUIP TOOL", 146, 28, Color3.fromRGB(70, 70, 70))
+    GUI_REFS.Buttons.scanCombat = mkBtn(c2, "ScanCombat", "SCAN ENEMY", 178, 28, Color3.fromRGB(60, 50, 90))
     
-    GUI_REFS.Buttons.harvestAll = mkBtn("HarvestAll", "INSTANT HARVEST ALL", 34, 48, Color3.fromRGB(0, 180, 90))
-    GUI_REFS.Buttons.autoLoop   = mkBtn("AutoLoop", "AUTO LOOP: OFF", 88, 28, Color3.fromRGB(0, 110, 180))
-    GUI_REFS.Buttons.debug      = mkBtn("Debug", "DEBUG SCAN", 122, 28, Color3.fromRGB(120, 60, 160))
-    GUI_REFS.Buttons.reset      = mkBtn("Reset", "RESET STATS", 156, 26, Color3.fromRGB(70, 40, 40))
-    GUI_REFS.Buttons.console    = mkBtn("Console", "SHOW/HIDE LOG", 188, 22, Color3.fromRGB(35, 60, 35))
-    
-    -- COL 3 INFO
+    -- COL 3: MOVEMENT + STATS
     local c3 = Instance.new("Frame")
-    c3.Size = UDim2.new(0, 200, 0, 210)
-    c3.Position = UDim2.new(0, 456, 0, 42)
+    c3.Size = UDim2.new(0, 225, 0, 230)
+    c3.Position = UDim2.new(0, 482, 0, 42)
     c3.BackgroundColor3 = Color3.fromRGB(20, 20, 28)
     c3.BorderSizePixel = 0
     c3.Parent = mf
@@ -595,24 +651,36 @@ local function createGUI()
     c3t.Size = UDim2.new(1, -16, 0, 22)
     c3t.Position = UDim2.new(0, 8, 0, 6)
     c3t.BackgroundTransparency = 1
-    c3t.Text = "INFORMASI"
+    c3t.Text = "MOVEMENT + STATS"
     c3t.TextColor3 = Color3.fromRGB(0, 200, 255)
     c3t.TextSize = 14
     c3t.Font = Enum.Font.GothamBold
     c3t.TextXAlignment = Enum.TextXAlignment.Left
     c3t.Parent = c3
     
-    local it = Instance.new("TextLabel")
-    it.Size = UDim2.new(1, -16, 0, 170)
-    it.Position = UDim2.new(0, 8, 0, 32)
-    it.BackgroundTransparency = 1
-    it.Text = "MODE: INSTANT\n\nPlants:\n- Ginseng\n- Spirit Grass\n\nCara kirim log:\n1. Klik DEBUG SCAN\n2. Klik COPY LOG\n3. Paste di chat ADIEL"
-    it.TextColor3 = Color3.fromRGB(180, 180, 200)
-    it.TextSize = 11
-    it.Font = Enum.Font.Code
-    it.TextXAlignment = Enum.TextXAlignment.Left
-    it.TextYAlignment = Enum.TextYAlignment.Top
-    it.Parent = c3
+    GUI_REFS.Buttons.speed = mkBtn(c3, "Speed", "SPEED BOOST: OFF", 34, 28, Color3.fromRGB(0, 110, 180))
+    GUI_REFS.Buttons.jump = mkBtn(c3, "Jump", "JUMP BOOST: OFF", 66, 28, Color3.fromRGB(0, 110, 180))
+    
+    local function mkLbl(n, y, col, size)
+        local l = Instance.new("TextLabel")
+        l.Size = UDim2.new(1, -16, 0, 18)
+        l.Position = UDim2.new(0, 8, 0, y)
+        l.BackgroundTransparency = 1
+        l.Text = n .. ": 0"
+        l.TextColor3 = col
+        l.TextSize = size or 11
+        l.Font = Enum.Font.Code
+        l.TextXAlignment = Enum.TextXAlignment.Left
+        l.Parent = c3
+        return l
+    end
+    
+    GUI_REFS.Labels.harvested = mkLbl("Harvested", 102, Color3.fromRGB(0, 220, 130))
+    GUI_REFS.Labels.killed    = mkLbl("Killed", 120, Color3.fromRGB(240, 120, 120))
+    GUI_REFS.Labels.herbs     = mkLbl("Herbs in Map", 138, Color3.fromRGB(140, 220, 140))
+    GUI_REFS.Labels.enemies   = mkLbl("Enemies in Map", 156, Color3.fromRGB(255, 150, 150))
+    GUI_REFS.Labels.status    = mkLbl("Status", 178, Color3.fromRGB(0, 220, 130), 12)
+    GUI_REFS.Labels.status.Text = "Status: IDLE"
     
     local cr = Instance.new("TextLabel")
     cr.Size = UDim2.new(1, -16, 0, 20)
@@ -620,37 +688,10 @@ local function createGUI()
     cr.BackgroundTransparency = 1
     cr.Text = "Script Created by ADIEL"
     cr.TextColor3 = Color3.fromRGB(100, 100, 130)
-    cr.TextSize = 11
+    cr.TextSize = 10
     cr.Font = Enum.Font.Gotham
     cr.TextXAlignment = Enum.TextXAlignment.Left
     cr.Parent = c3
-    
-    -- LOG PANEL
-    local logFrame = Instance.new("Frame")
-    logFrame.Name = "LogPanel"
-    logFrame.Size = UDim2.new(1, -24, 0, 50)
-    logFrame.Position = UDim2.new(0, 12, 1, -58)
-    logFrame.BackgroundColor3 = Color3.fromRGB(10, 10, 15)
-    logFrame.BorderSizePixel = 0
-    logFrame.ClipsDescendants = true
-    logFrame.Parent = mf
-    local lfc = Instance.new("UICorner"); lfc.CornerRadius = UDim.new(0, 6); lfc.Parent = logFrame
-    
-    local sc = Instance.new("ScrollingFrame")
-    sc.Size = UDim2.new(1, -8, 1, -8)
-    sc.Position = UDim2.new(0, 4, 0, 4)
-    sc.BackgroundTransparency = 1
-    sc.BorderSizePixel = 0
-    sc.ScrollBarThickness = 3
-    sc.CanvasSize = UDim2.new(0, 0, 0, 0)
-    sc.AutomaticCanvasSize = Enum.AutomaticSize.Y
-    sc.Parent = logFrame
-    GUI_REFS.LogFrame = sc
-    
-    local ll = Instance.new("UIListLayout")
-    ll.SortOrder = Enum.SortOrder.LayoutOrder
-    ll.Padding = UDim.new(0, 1)
-    ll.Parent = sc
 end
 
 --==============================================================================
@@ -684,23 +725,43 @@ end
 local function startStatsUpdater()
     task.spawn(function()
         while true do
-            task.wait(0.3)
+            task.wait(0.5)
             pcall(function()
-                if GUI_REFS.Labels.total then GUI_REFS.Labels.total.Text = "Total: " .. tostring(stats.collected) end
-                if GUI_REFS.Labels.ginseng then GUI_REFS.Labels.ginseng.Text = "Ginseng: " .. tostring(stats.ginseng) end
-                if GUI_REFS.Labels.spirit then GUI_REFS.Labels.spirit.Text = "Spirit Grass: " .. tostring(stats.spiritGrass) end
-                if GUI_REFS.Labels.lastScan then GUI_REFS.Labels.lastScan.Text = "Last Scan: " .. tostring(stats.lastScanCount) end
+                local herbs = getAllHerbs()
+                local enemies = getAllEnemies()
+                stats.lastHerbCount = #herbs
+                stats.lastEnemyCount = #enemies
+                
+                if GUI_REFS.Labels.harvested then
+                    GUI_REFS.Labels.harvested.Text = "Harvested: " .. tostring(stats.harvested)
+                end
+                if GUI_REFS.Labels.killed then
+                    GUI_REFS.Labels.killed.Text = "Killed: " .. tostring(stats.killed)
+                end
+                if GUI_REFS.Labels.herbs then
+                    GUI_REFS.Labels.herbs.Text = "Herbs in Map: " .. tostring(#herbs)
+                end
+                if GUI_REFS.Labels.enemies then
+                    GUI_REFS.Labels.enemies.Text = "Enemies in Map: " .. tostring(#enemies)
+                end
                 if GUI_REFS.Labels.status then
-                    if STATE.isHarvesting then
-                        GUI_REFS.Labels.status.Text = "Status: HARVESTING"
-                        GUI_REFS.Labels.status.TextColor3 = Color3.fromRGB(255, 200, 0)
-                    elseif STATE.autoLoopActive then
-                        GUI_REFS.Labels.status.Text = "Status: AUTO LOOP"
-                        GUI_REFS.Labels.status.TextColor3 = Color3.fromRGB(0, 200, 255)
-                    else
-                        GUI_REFS.Labels.status.Text = "Status: IDLE"
-                        GUI_REFS.Labels.status.TextColor3 = Color3.fromRGB(0, 220, 130)
+                    local statusText = "IDLE"
+                    local statusColor = Color3.fromRGB(0, 220, 130)
+                    if STATE.autoFarm then
+                        statusText = "AUTO FARM"
+                        statusColor = Color3.fromRGB(160, 100, 255)
+                    elseif STATE.killAura and STATE.autoHarvest then
+                        statusText = "FULL MODE"
+                        statusColor = Color3.fromRGB(255, 200, 0)
+                    elseif STATE.killAura then
+                        statusText = "KILL AURA"
+                        statusColor = Color3.fromRGB(255, 100, 100)
+                    elseif STATE.autoHarvest then
+                        statusText = "AUTO HARVEST"
+                        statusColor = Color3.fromRGB(0, 200, 255)
                     end
+                    GUI_REFS.Labels.status.Text = "Status: " .. statusText
+                    GUI_REFS.Labels.status.TextColor3 = statusColor
                 end
             end)
         end
@@ -711,68 +772,125 @@ end
 -- EVENTS
 --==============================================================================
 local function bindEvents()
-    GUI_REFS.Buttons.harvestAll.MouseButton1Click:Connect(function()
-        task.spawn(function() pcall(harvestAllInstant) end)
+    GUI_REFS.Buttons.harvestNow.MouseButton1Click:Connect(function()
+        task.spawn(function() pcall(harvestAllHerbs) end)
     end)
     
-    GUI_REFS.Buttons.autoLoop.MouseButton1Click:Connect(function()
-        if STATE.autoLoopActive then
-            stopAutoLoop()
-            GUI_REFS.Buttons.autoLoop.Text = "AUTO LOOP: OFF"
-            GUI_REFS.Buttons.autoLoop.BackgroundColor3 = Color3.fromRGB(0, 110, 180)
-        else
-            startAutoLoop()
-            GUI_REFS.Buttons.autoLoop.Text = "AUTO LOOP: ON"
-            GUI_REFS.Buttons.autoLoop.BackgroundColor3 = Color3.fromRGB(0, 180, 90)
-        end
-    end)
-    
-    GUI_REFS.Buttons.debug.MouseButton1Click:Connect(function()
-        logBuffer = {}
-        task.spawn(function() pcall(debugScan) end)
-    end)
-    
-    GUI_REFS.Buttons.reset.MouseButton1Click:Connect(function()
-        stats.collected = 0; stats.ginseng = 0; stats.spiritGrass = 0; stats.lastScanCount = 0
-        log("Stats reset", "warn")
-    end)
-    
-    GUI_REFS.Buttons.console.MouseButton1Click:Connect(function()
-        if GUI_REFS.LogFrame and GUI_REFS.LogFrame.Parent then
-            GUI_REFS.LogFrame.Parent.Visible = not GUI_REFS.LogFrame.Parent.Visible
-        end
-    end)
-    
-    -- COPY LOG BUTTON
-    if GUI_REFS.Buttons.copyLog then
-        GUI_REFS.Buttons.copyLog.MouseButton1Click:Connect(function()
-            pcall(function()
-                local fullText = table.concat(logBuffer, "\n")
-                if #fullText == 0 then
-                    log("Log kosong, klik DEBUG SCAN dulu", "warn")
-                    return
-                end
-                
-                local copied = false
-                if setclipboard then
-                    setclipboard(fullText)
-                    copied = true
-                elseif toclipboard then
-                    toclipboard(fullText)
-                    copied = true
-                elseif syn and syn.write_clipboard then
-                    syn.write_clipboard(fullText)
-                    copied = true
-                end
-                
-                if copied then
-                    log("Log ter-copy! (" .. tostring(#logBuffer) .. " baris). Paste di chat ADIEL.", "success")
-                else
-                    log("Clipboard gak support. Screenshot log panel aja.", "error")
+    GUI_REFS.Buttons.autoHarvest.MouseButton1Click:Connect(function()
+        STATE.autoHarvest = not STATE.autoHarvest
+        if STATE.autoHarvest then
+            GUI_REFS.Buttons.autoHarvest.Text = "AUTO HARVEST: ON"
+            GUI_REFS.Buttons.autoHarvest.BackgroundColor3 = Color3.fromRGB(0, 180, 90)
+            task.spawn(function()
+                while STATE.autoHarvest do
+                    pcall(harvestAllHerbs)
+                    task.wait(1)
                 end
             end)
-        end)
-    end
+        else
+            GUI_REFS.Buttons.autoHarvest.Text = "AUTO HARVEST: OFF"
+            GUI_REFS.Buttons.autoHarvest.BackgroundColor3 = Color3.fromRGB(0, 110, 180)
+        end
+    end)
+    
+    GUI_REFS.Buttons.autoFarm.MouseButton1Click:Connect(function()
+        if STATE.autoFarm then
+            stopAutoFarm()
+            GUI_REFS.Buttons.autoFarm.Text = "AUTO FARM LOOP: OFF"
+            GUI_REFS.Buttons.autoFarm.BackgroundColor3 = Color3.fromRGB(80, 60, 160)
+        else
+            STATE.autoFarm = true
+            startAutoFarm()
+            GUI_REFS.Buttons.autoFarm.Text = "AUTO FARM LOOP: ON"
+            GUI_REFS.Buttons.autoFarm.BackgroundColor3 = Color3.fromRGB(130, 90, 220)
+        end
+    end)
+    
+    GUI_REFS.Buttons.espHerbs.MouseButton1Click:Connect(function()
+        STATE.espHerbs = not STATE.espHerbs
+        if STATE.espHerbs then
+            GUI_REFS.Buttons.espHerbs.Text = "ESP HERBS: ON"
+            GUI_REFS.Buttons.espHerbs.BackgroundColor3 = Color3.fromRGB(150, 150, 0)
+            startESP()
+        else
+            GUI_REFS.Buttons.espHerbs.Text = "ESP HERBS: OFF"
+            GUI_REFS.Buttons.espHerbs.BackgroundColor3 = Color3.fromRGB(100, 100, 0)
+            if not STATE.espEnemies then stopESP() end
+        end
+    end)
+    
+    GUI_REFS.Buttons.tpHHerb.MouseButton1Click:Connect(function()
+        task.spawn(function() pcall(teleportToNearestHerb) end)
+    end)
+    
+    GUI_REFS.Buttons.killAura.MouseButton1Click:Connect(function()
+        STATE.killAura = not STATE.killAura
+        if STATE.killAura then
+            GUI_REFS.Buttons.killAura.Text = "KILL AURA: ON"
+            GUI_REFS.Buttons.killAura.BackgroundColor3 = Color3.fromRGB(255, 80, 80)
+            startKillAura()
+        else
+            GUI_REFS.Buttons.killAura.Text = "KILL AURA: OFF"
+            GUI_REFS.Buttons.killAura.BackgroundColor3 = Color3.fromRGB(180, 50, 50)
+            stopKillAura()
+        end
+    end)
+    
+    GUI_REFS.Buttons.espEnemies.MouseButton1Click:Connect(function()
+        STATE.espEnemies = not STATE.espEnemies
+        if STATE.espEnemies then
+            GUI_REFS.Buttons.espEnemies.Text = "ESP ENEMY: ON"
+            GUI_REFS.Buttons.espEnemies.BackgroundColor3 = Color3.fromRGB(150, 150, 0)
+            startESP()
+        else
+            GUI_REFS.Buttons.espEnemies.Text = "ESP ENEMY: OFF"
+            GUI_REFS.Buttons.espEnemies.BackgroundColor3 = Color3.fromRGB(100, 100, 0)
+            if not STATE.espHerbs then stopESP() end
+        end
+    end)
+    
+    GUI_REFS.Buttons.tpEnemy.MouseButton1Click:Connect(function()
+        task.spawn(function() pcall(teleportToNearestEnemy) end)
+    end)
+    
+    GUI_REFS.Buttons.equipTool.MouseButton1Click:Connect(function()
+        pcall(equipFirstTool)
+        log("Tool di-equip", "info")
+    end)
+    
+    GUI_REFS.Buttons.scanCombat.MouseButton1Click:Connect(function()
+        local enemies = getAllEnemies()
+        log("Enemies ditemukan: " .. tostring(#enemies), "info")
+        for i, e in ipairs(enemies) do
+            if i <= 5 then
+                log("  " .. e.obj.Name .. " | HP: " .. tostring(math.floor(e.humanoid.Health)) .. "/" .. tostring(math.floor(e.humanoid.MaxHealth)), "info")
+            end
+        end
+    end)
+    
+    GUI_REFS.Buttons.speed.MouseButton1Click:Connect(function()
+        STATE.speedBoost = not STATE.speedBoost
+        applySpeedJump()
+        if STATE.speedBoost then
+            GUI_REFS.Buttons.speed.Text = "SPEED BOOST: ON"
+            GUI_REFS.Buttons.speed.BackgroundColor3 = Color3.fromRGB(0, 180, 90)
+        else
+            GUI_REFS.Buttons.speed.Text = "SPEED BOOST: OFF"
+            GUI_REFS.Buttons.speed.BackgroundColor3 = Color3.fromRGB(0, 110, 180)
+        end
+    end)
+    
+    GUI_REFS.Buttons.jump.MouseButton1Click:Connect(function()
+        STATE.jumpBoost = not STATE.jumpBoost
+        applySpeedJump()
+        if STATE.jumpBoost then
+            GUI_REFS.Buttons.jump.Text = "JUMP BOOST: ON"
+            GUI_REFS.Buttons.jump.BackgroundColor3 = Color3.fromRGB(0, 180, 90)
+        else
+            GUI_REFS.Buttons.jump.Text = "JUMP BOOST: OFF"
+            GUI_REFS.Buttons.jump.BackgroundColor3 = Color3.fromRGB(0, 110, 180)
+        end
+    end)
     
     GUI_REFS.Buttons.minBtn.MouseButton1Click:Connect(function()
         GUI_REFS.MainFrame.Visible = false
@@ -796,38 +914,27 @@ local function setupAntiAFK()
     end)
 end
 
-local function reconnectCharacter()
-    pcall(function()
-        LocalPlayer.CharacterAdded:Connect(function()
-            task.wait(1)
-            updateCharacterRefs()
-        end)
-    end)
-end
-
 --==============================================================================
 -- INIT
 --==============================================================================
 local function init()
     updateCharacterRefs()
-    reconnectCharacter()
+    
+    LocalPlayer.CharacterAdded:Connect(function()
+        task.wait(2)
+        updateCharacterRefs()
+        applySpeedJump()
+        log("Character respawn - refs updated", "info")
+    end)
+    
     createGUI()
     makeDraggable(GUI_REFS.MainFrame, GUI_REFS.MainFrame:FindFirstChild("TitleBar"))
     bindEvents()
     startStatsUpdater()
     setupAntiAFK()
     
-    task.spawn(function()
-        task.wait(0.3)
-        pcall(function()
-            getRemotes()
-            local plants = findAllPlants()
-            stats.lastScanCount = #plants
-            log("Ready. " .. tostring(#plants) .. " plants detected", "success")
-        end)
-    end)
-    
-    log("Script Created by ADIEL - v8.2 INSTANT + DEBUG + COPY LOG", "success")
+    log("Script Created by ADIEL - Xianxia God Mode v1.0", "success")
+    log("Tags detected: Herbs=" .. tostring(#getAllHerbs()) .. " | Enemy=" .. tostring(#getAllEnemies()), "info")
 end
 
 init()
