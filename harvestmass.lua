@@ -1,11 +1,12 @@
 --[[
 ================================================================================
-    TRUE MASS HARVEST v8.1 (INSTANT + DEBUG)
+    TRUE MASS HARVEST v8.2 (INSTANT + DEBUG + COPY LOG)
     Script Created by ADIEL
     
-    Changelog v8.1:
-    - Tambah tombol DEBUG SCAN buat liat remote, plant, tag, tool
-    - Semua hasil debug masuk ke log panel di GUI
+    Changelog v8.2:
+    - Tambah tombol COPY LOG di title bar
+    - Semua log ke-buffer, tinggal klik COPY LOG -> paste
+    - Auto reset buffer tiap klik DEBUG SCAN
 ================================================================================
 ]]
 
@@ -39,13 +40,15 @@ local CONFIG = {
 local stats = {collected = 0, ginseng = 0, spiritGrass = 0, lastScanCount = 0}
 local STATE = {isHarvesting = false, autoLoopActive = false, autoLoopThread = nil, character = nil, humanoid = nil, rootPart = nil}
 local GUI_REFS = {ScreenGui = nil, MainFrame = nil, Labels = {}, Buttons = {}, LogFrame = nil}
+local logBuffer = {}
 
 --==============================================================================
--- LOG
+-- LOG (WITH BUFFER)
 --==============================================================================
 local function log(msg, logType)
     logType = logType or "info"
-    local fullMsg = "[TMM v8.1] " .. tostring(msg)
+    table.insert(logBuffer, "[" .. logType:upper() .. "] " .. tostring(msg))
+    local fullMsg = "[TMM v8.2] " .. tostring(msg)
     if logType == "error" then warn(fullMsg) else print(fullMsg) end
     if GUI_REFS.LogFrame then
         local entry = Instance.new("TextLabel")
@@ -139,7 +142,7 @@ local function findAllPlants()
 end
 
 --==============================================================================
--- DEBUG SCAN (BARU DI v8.1)
+-- DEBUG SCAN
 --==============================================================================
 local function debugScan()
     log("========== DEBUG SCAN START ==========", "debug")
@@ -193,7 +196,7 @@ local function debugScan()
             for _, kw in ipairs(plantKeywords) do
                 if string.find(ln, kw, 1, true) then match = true; break end
             end
-            if match and plantCount < 5 then
+            if match and plantCount < 8 then
                 log("PLANT: " .. obj.ClassName .. " | " .. obj.Name, "debug")
                 for _, ch in ipairs(obj:GetDescendants()) do
                     if ch:IsA("ProximityPrompt") then
@@ -202,6 +205,8 @@ local function debugScan()
                         log("   ClickDet: " .. ch.Name, "debug")
                     elseif ch:IsA("RemoteEvent") or ch:IsA("RemoteFunction") then
                         log("   " .. ch.ClassName .. ": " .. ch.Name, "debug")
+                    elseif ch:IsA("BasePart") then
+                        log("   Part: " .. ch.Name, "debug")
                     end
                 end
                 plantCount = plantCount + 1
@@ -425,7 +430,7 @@ local function createGUI()
     local mfc = Instance.new("UICorner"); mfc.CornerRadius = UDim.new(0, 10); mfc.Parent = mf
     local mfs = Instance.new("UIStroke"); mfs.Color = Color3.fromRGB(40, 40, 55); mfs.Parent = mf
     
-    -- TITLE
+    -- TITLE BAR
     local tb = Instance.new("Frame")
     tb.Name = "TitleBar"
     tb.Size = UDim2.new(1, 0, 0, 35)
@@ -442,15 +447,30 @@ local function createGUI()
     tbm.Parent = tb
     
     local tl = Instance.new("TextLabel")
-    tl.Size = UDim2.new(1, -90, 1, 0)
+    tl.Size = UDim2.new(1, -230, 1, 0)
     tl.Position = UDim2.new(0, 12, 0, 0)
     tl.BackgroundTransparency = 1
-    tl.Text = "TRUE MASS HARVEST v8.1 - Script Created by ADIEL"
+    tl.Text = "TRUE MASS HARVEST v8.2 - Script Created by ADIEL"
     tl.TextColor3 = Color3.fromRGB(0, 220, 130)
     tl.TextSize = 13
     tl.Font = Enum.Font.GothamBold
     tl.TextXAlignment = Enum.TextXAlignment.Left
     tl.Parent = tb
+    
+    -- COPY LOG BUTTON
+    local copyBtn = Instance.new("TextButton")
+    copyBtn.Name = "CopyLog"
+    copyBtn.Size = UDim2.new(0, 100, 0, 25)
+    copyBtn.Position = UDim2.new(1, -170, 0, 5)
+    copyBtn.BackgroundColor3 = Color3.fromRGB(30, 100, 180)
+    copyBtn.BorderSizePixel = 0
+    copyBtn.Text = "COPY LOG"
+    copyBtn.TextColor3 = Color3.fromRGB(240, 240, 240)
+    copyBtn.TextSize = 11
+    copyBtn.Font = Enum.Font.GothamBold
+    copyBtn.Parent = tb
+    local copyCorner = Instance.new("UICorner"); copyCorner.CornerRadius = UDim.new(0, 5); copyCorner.Parent = copyBtn
+    GUI_REFS.Buttons.copyLog = copyBtn
     
     local minB = Instance.new("TextButton")
     minB.Size = UDim2.new(0, 30, 0, 25)
@@ -586,7 +606,7 @@ local function createGUI()
     it.Size = UDim2.new(1, -16, 0, 170)
     it.Position = UDim2.new(0, 8, 0, 32)
     it.BackgroundTransparency = 1
-    it.Text = "MODE: INSTANT\n\nPlants:\n- Ginseng\n- Spirit Grass\n\nKalo gagal harvest:\n1. Klik DEBUG SCAN\n2. Liat hasil di log\n3. Kirim ke ADIEL"
+    it.Text = "MODE: INSTANT\n\nPlants:\n- Ginseng\n- Spirit Grass\n\nCara kirim log:\n1. Klik DEBUG SCAN\n2. Klik COPY LOG\n3. Paste di chat ADIEL"
     it.TextColor3 = Color3.fromRGB(180, 180, 200)
     it.TextSize = 11
     it.Font = Enum.Font.Code
@@ -708,6 +728,7 @@ local function bindEvents()
     end)
     
     GUI_REFS.Buttons.debug.MouseButton1Click:Connect(function()
+        logBuffer = {}
         task.spawn(function() pcall(debugScan) end)
     end)
     
@@ -721,6 +742,37 @@ local function bindEvents()
             GUI_REFS.LogFrame.Parent.Visible = not GUI_REFS.LogFrame.Parent.Visible
         end
     end)
+    
+    -- COPY LOG BUTTON
+    if GUI_REFS.Buttons.copyLog then
+        GUI_REFS.Buttons.copyLog.MouseButton1Click:Connect(function()
+            pcall(function()
+                local fullText = table.concat(logBuffer, "\n")
+                if #fullText == 0 then
+                    log("Log kosong, klik DEBUG SCAN dulu", "warn")
+                    return
+                end
+                
+                local copied = false
+                if setclipboard then
+                    setclipboard(fullText)
+                    copied = true
+                elseif toclipboard then
+                    toclipboard(fullText)
+                    copied = true
+                elseif syn and syn.write_clipboard then
+                    syn.write_clipboard(fullText)
+                    copied = true
+                end
+                
+                if copied then
+                    log("Log ter-copy! (" .. tostring(#logBuffer) .. " baris). Paste di chat ADIEL.", "success")
+                else
+                    log("Clipboard gak support. Screenshot log panel aja.", "error")
+                end
+            end)
+        end)
+    end
     
     GUI_REFS.Buttons.minBtn.MouseButton1Click:Connect(function()
         GUI_REFS.MainFrame.Visible = false
@@ -775,7 +827,7 @@ local function init()
         end)
     end)
     
-    log("Script Created by ADIEL - v8.1 INSTANT + DEBUG", "success")
+    log("Script Created by ADIEL - v8.2 INSTANT + DEBUG + COPY LOG", "success")
 end
 
 init()
