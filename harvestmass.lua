@@ -1,239 +1,261 @@
 --[[
-=========================================================
-  MASS HARVEST v6.0 - PLANT COLLECTOR
-  Author: Kyriel (for ADIEL)
-  Executor: Delta / Codex / Wave / Xeno
-
-FITUR:
-  - MASS HARVEST (semua plant di map sekaligus)
-  - 3 Metode Deteksi:
-      1. GetDescendants() - scan semua object
-      2. CollectionService - tag "Harvestable"
-      3. Batch Processing - proses banyak sekaligus
-  - Server-side inventory update via RemoteEvent
-  - Plants: Ginseng, Spirit Grass
-=========================================================
+================================================================================
+    TRUE MASS HARVEST v6.1
+    Script Created by ADIEL
+    
+    Executor    : Delta / Codex / Wave / Xeno (Mobile Android)
+    Mode        : NO TELEPORT - Distance Harvest
+    Target      : Ginseng / Spirit Grass / SpiritGrass
+    Load        : loadstring(game:HttpGet("URL"))()
+================================================================================
 ]]
 
--- ============================================================
--- SERVICES
--- ============================================================
-local Players = game:GetService("Players")
-local UserInputService = game:GetService("UserInputService")
-local VirtualUser = game:GetService("VirtualUser")
-local CollectionService = game:GetService("CollectionService")
+--==============================================================================
+-- SECTION 1 : HEADER + CREDIT
+--==============================================================================
+-- Script Created by ADIEL
+-- TRUE MASS HARVEST v6.1 - Distance Harvest Engine
+-- Compatible: Delta, Codex, Wave, Xeno
+
+--==============================================================================
+-- SECTION 2 : SERVICES
+--==============================================================================
+local Players           = game:GetService("Players")
+local Workspace         = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local ServerStorage     = game:GetService("ServerStorage")
+local ServerScriptService = game:GetService("ServerScriptService")
+local CollectionService = game:GetService("CollectionService")
+local UserInputService  = game:GetService("UserInputService")
+local RunService        = game:GetService("RunService")
+local VirtualUser       = game:GetService("VirtualUser")
+local TweenService      = game:GetService("TweenService")
 
-local player = Players.LocalPlayer
-local character = player.Character or player.CharacterAdded:Wait()
-local humanoidRootPart = character:WaitForChild("HumanoidRootPart")
-local humanoid = character:WaitForChild("Humanoid")
+local LocalPlayer       = Players.LocalPlayer
+local Camera            = Workspace.CurrentCamera
 
--- ============================================================
--- CONFIG
--- ============================================================
+--==============================================================================
+-- SECTION 3 : CONFIG TABLE
+--==============================================================================
 local CONFIG = {
-    -- ═══ PLANT DETECTION ═══
-    PLANT_NAMES = {
-        "Ginseng",
-        "Spirit Grass",
-        "SpiritGrass",
-    },
-    
-    -- Tag CollectionService buat plant
-    HARVESTABLE_TAGS = {
-        "Harvestable",
-        "Plant",
-        "Herb",
-        "Collectable",
-        "Resource",
-    },
-    
-    -- ═══ BATCH PROCESSING ═══
-    BATCH_SIZE = 20,              -- Proses 20 plant sekaligus
-    BATCH_DELAY = 0.05,           -- Delay antar batch (detik)
-    TELEPORT_DELAY = 0.1,         -- Delay teleport per plant
-    FIRE_DELAY = 0.15,            -- Delay abis fire prompt
-    
-    -- ═══ SCAN ═══
-    MAX_DEPTH = 8,                -- Depth recursive scan
-    AUTO_SCAN_INTERVAL = 5,       -- Auto rescan tiap X detik (kalo loop aktif)
-    
-    -- ═══ MODE ═══
-    FORCE_PROMPT_DISTANCE = true, -- Paksa MaxActivationDistance = math.huge
-    USE_REMOTE_EVENT = true,      -- Coba fire RemoteEvent
-    USE_TELEPORT = true,          -- Teleport ke plant (kalo prompt butuh jarak)
-    AUTO_LOOP = false,            -- Auto loop harvest
-    
-    -- ═══ DEBUG ═══
-    DEBUG = false,
-    LOG_LIMIT = 50,
+    PLANT_NAMES       = {"Ginseng", "Spirit Grass", "SpiritGrass"},
+    HARVESTABLE_TAGS  = {"Harvestable", "Plant", "Herb", "Collectable", "Resource"},
+    REMOTE_KEYWORDS   = {"harvest", "collect", "plant", "gather", "pickup", "grab", "herb", "pluck", "reap"},
+    BATCH_SIZE        = 30,
+    BATCH_DELAY       = 0.02,
+    FIRE_DELAY        = 0.03,
+    FORCE_DISTANCE    = 999999,
+    MAX_DEPTH         = 10,
+    AUTO_SCAN_INTERVAL = 3,
+    DEBUG             = false,
+    LOG_LIMIT         = 50,
 }
 
--- ============================================================
--- STATE
--- ============================================================
-local isHarvesting = false
-local autoLoop = false
-local cachedTool = nil
-
+--==============================================================================
+-- SECTION 4 : STATE VARIABLES
+--==============================================================================
 local stats = {
-    collected = 0,
+    collected    = 0,
     lastScanCount = 0,
-    startTime = 0,
-    ginseng = 0,
-    spiritGrass = 0,
+    startTime    = 0,
+    ginseng      = 0,
+    spiritGrass  = 0,
+    lastDuration = 0,
 }
 
--- ============================================================
--- LOG SYSTEM
--- ============================================================
-local LogScroll = nil
-local ConsolePopup = nil
-local logCount = 0
+local STATE = {
+    autoLoopActive = false,
+    autoLoopThread = nil,
+    isHarvesting   = false,
+    guiVisible     = true,
+    consoleVisible = false,
+    character      = nil,
+    humanoid       = nil,
+    rootPart       = nil,
+    logs           = {},
+}
 
-local function log(msg, color)
-    if CONFIG.DEBUG then
-        print("[Harvest] " .. tostring(msg))
+local GUI_REFS = {
+    ScreenGui  = nil,
+    MainFrame  = nil,
+    Bubble     = nil,
+    Console    = nil,
+    Labels     = {},
+    Buttons    = {},
+    LogFrame   = nil,
+    LogLayout  = nil,
+}
+
+--==============================================================================
+-- SECTION 5 : LOG SYSTEM
+--==============================================================================
+local function log(msg, logType)
+    logType = logType or "info"
+    local prefix = "[TRUE MASS HARVEST] "
+    local fullMsg = prefix .. tostring(msg)
+    
+    if logType == "success" then
+        print(fullMsg)
+    elseif logType == "error" then
+        warn(fullMsg)
+    else
+        print(fullMsg)
     end
     
-    if not LogScroll or not LogScroll.Parent or not ConsolePopup or not ConsolePopup.Visible then
-        return
-    end
-    
-    local newLabel = Instance.new("TextLabel")
-    newLabel.Size = UDim2.new(1, -6, 0, 0)
-    newLabel.AutomaticSize = Enum.AutomaticSize.Y
-    newLabel.BackgroundTransparency = 1
-    newLabel.TextColor3 = color or Color3.fromRGB(150, 255, 150)
-    newLabel.Text = "> " .. tostring(msg)
-    newLabel.TextSize = 10
-    newLabel.Font = Enum.Font.Code
-    newLabel.TextXAlignment = Enum.TextXAlignment.Left
-    newLabel.TextWrapped = true
-    newLabel.Parent = LogScroll
-    
-    logCount = logCount + 1
-    LogScroll.CanvasPosition = Vector2.new(0, LogScroll.AbsoluteCanvasSize.Y)
-    
-    if logCount > CONFIG.LOG_LIMIT then
-        for _, child in ipairs(LogScroll:GetChildren()) do
-            if child:IsA("TextLabel") then
-                child:Destroy()
-                logCount = logCount - 1
-                break
+    if GUI_REFS.LogFrame then
+        local entry = Instance.new("TextLabel")
+        entry.Size = UDim2.new(1, -6, 0, 18)
+        entry.BackgroundTransparency = 1
+        entry.TextXAlignment = Enum.TextXAlignment.Left
+        entry.TextScaled = false
+        entry.TextSize = 12
+        entry.Font = Enum.Font.Code
+        entry.Text = "[" .. logType:upper() .. "] " .. tostring(msg)
+        
+        if logType == "success" then
+            entry.TextColor3 = Color3.fromRGB(0, 220, 130)
+        elseif logType == "error" then
+            entry.TextColor3 = Color3.fromRGB(240, 80, 80)
+        elseif logType == "warn" then
+            entry.TextColor3 = Color3.fromRGB(240, 200, 80)
+        else
+            entry.TextColor3 = Color3.fromRGB(120, 180, 240)
+        end
+        
+        entry.Parent = GUI_REFS.LogFrame
+        
+        table.insert(STATE.logs, entry)
+        if #STATE.logs > CONFIG.LOG_LIMIT then
+            local old = table.remove(STATE.logs, 1)
+            if old and old.Parent then
+                old:Destroy()
             end
         end
     end
 end
 
--- ============================================================
--- UTILITY
--- ============================================================
+--==============================================================================
+-- SECTION 6 : UTILITY FUNCTIONS
+--==============================================================================
 local function updateCharacterRefs()
-    character = player.Character or player.CharacterAdded:Wait()
-    humanoidRootPart = character:WaitForChild("HumanoidRootPart")
-    humanoid = character:WaitForChild("Humanoid")
+    local char = LocalPlayer.Character
+    if char then
+        STATE.character = char
+        STATE.humanoid  = char:FindFirstChildOfClass("Humanoid")
+        STATE.rootPart  = char:FindFirstChild("HumanoidRootPart") or char.PrimaryPart
+    end
 end
 
-local function getPlantType(name)
-    local nameLower = string.lower(name)
+local function getPlantType(plantObj)
+    local name = ""
+    if plantObj and plantObj.Name then
+        name = string.lower(plantObj.Name)
+    end
+    
+    if string.find(name, "ginseng") then
+        return "Ginseng"
+    elseif string.find(name, "spirit") or string.find(name, "grass") then
+        return "Spirit Grass"
+    end
+    
+    return "Unknown"
+end
+
+local function isPlantName(objName)
+    if not objName then return false end
+    local lowerName = string.lower(objName)
     for _, plantName in ipairs(CONFIG.PLANT_NAMES) do
-        if string.find(nameLower, string.lower(plantName)) then
-            return plantName
+        if string.find(lowerName, string.lower(plantName), 1, true) then
+            return true
         end
     end
-    return nil
+    return false
 end
 
--- ============================================================
--- METODE 1: GetDescendants() SCAN
--- ============================================================
+local function getRootPart(obj)
+    if not obj then return nil end
+    if obj:IsA("BasePart") then return obj end
+    if obj.PrimaryPart then return obj.PrimaryPart end
+    if obj:FindFirstChild("HumanoidRootPart") then return obj.HumanoidRootPart end
+    if obj:FindFirstChild("Head") then return obj.Head end
+    if obj:FindFirstChild("Handle") then return obj.Handle end
+    if obj:FindFirstChild("Base") then return obj.Base end
+    local found = obj:FindFirstChildWhichIsA("BasePart", true)
+    return found
+end
+
+local function safeDestroy(inst)
+    pcall(function()
+        if inst and inst.Parent then
+            inst:Destroy()
+        end
+    end)
+end
+
+--==============================================================================
+-- SECTION 7 : DETECTION 1 - GetDescendants
+--==============================================================================
 local function findPlantsByDescendants()
-    local plants = {}
+    local found = {}
+    local descendants = {}
     
-    for _, obj in ipairs(workspace:GetDescendants()) do
+    local ok = pcall(function()
+        descendants = Workspace:GetDescendants()
+    end)
+    
+    if not ok then return found end
+    
+    for _, obj in ipairs(descendants) do
         if not obj or not obj.Parent then continue end
         
-        local plantType = getPlantType(obj.Name)
-        if plantType then
-            local root = nil
-            local prompt = nil
-            local clickDetector = nil
-            
-            if obj:IsA("Model") then
-                root = obj.PrimaryPart 
-                    or obj:FindFirstChild("HumanoidRootPart")
-                    or obj:FindFirstChild("Head")
-                    or obj:FindFirstChild("Handle")
-                    or obj:FindFirstChild("Base")
-                    or obj:FindFirstChildWhichIsA("BasePart", true)
-                    
-                prompt = obj:FindFirstChildWhichIsA("ProximityPrompt", true)
-                clickDetector = obj:FindFirstChildWhichIsA("ClickDetector", true)
-            elseif obj:IsA("BasePart") then
-                root = obj
-                prompt = obj:FindFirstChildWhichIsA("ProximityPrompt", true)
-                clickDetector = obj:FindFirstChildWhichIsA("ClickDetector", true)
+        local isMatch = false
+        
+        if isPlantName(obj.Name) then
+            isMatch = true
+        end
+        
+        if not isMatch and obj:IsA("Model") then
+            if isPlantName(obj.Name) then
+                isMatch = true
             end
-            
+        end
+        
+        if isMatch then
+            local root = getRootPart(obj)
             if root then
-                table.insert(plants, {
+                table.insert(found, {
                     obj = obj,
                     root = root,
-                    name = plantType,
-                    prompt = prompt,
-                    clickDetector = clickDetector,
-                    method = "Descendants"
+                    type = getPlantType(obj),
                 })
             end
         end
     end
     
-    return plants
+    return found
 end
 
--- ============================================================
--- METODE 2: CollectionService SCAN (HARVESTABLE TAGS)
--- ============================================================
+--==============================================================================
+-- SECTION 8 : DETECTION 2 - CollectionService Tags
+--==============================================================================
 local function findPlantsByTags()
-    local plants = {}
-    local seen = {}
+    local found = {}
     
     for _, tag in ipairs(CONFIG.HARVESTABLE_TAGS) do
-        local taggedObjects = CollectionService:GetTagged(tag)
+        local tagged = {}
+        local ok = pcall(function()
+            tagged = CollectionService:GetTagged(tag)
+        end)
         
-        for _, obj in ipairs(taggedObjects) do
-            if obj and obj.Parent and not seen[obj] then
-                seen[obj] = true
-                
-                local plantType = getPlantType(obj.Name)
-                if plantType then
-                    local root = nil
-                    local prompt = nil
-                    local clickDetector = nil
-                    
-                    if obj:IsA("Model") then
-                        root = obj.PrimaryPart 
-                            or obj:FindFirstChild("HumanoidRootPart")
-                            or obj:FindFirstChild("Head")
-                            or obj:FindFirstChild("Handle")
-                            or obj:FindFirstChildWhichIsA("BasePart", true)
-                    elseif obj:IsA("BasePart") then
-                        root = obj
-                    end
-                    
+        if ok and tagged then
+            for _, obj in ipairs(tagged) do
+                if obj and obj.Parent then
+                    local root = getRootPart(obj)
                     if root then
-                        prompt = obj:FindFirstChildWhichIsA("ProximityPrompt", true)
-                        clickDetector = obj:FindFirstChildWhichIsA("ClickDetector", true)
-                        
-                        table.insert(plants, {
+                        table.insert(found, {
                             obj = obj,
                             root = root,
-                            name = plantType,
-                            prompt = prompt,
-                            clickDetector = clickDetector,
-                            method = "Tag: " .. tag
+                            type = getPlantType(obj),
                         })
                     end
                 end
@@ -241,178 +263,220 @@ local function findPlantsByTags()
         end
     end
     
-    return plants
+    return found
 end
 
--- ============================================================
--- MERGE + DEDUPLICATE
--- ============================================================
+--==============================================================================
+-- SECTION 9 : MERGE + DEDUPLICATE
+--==============================================================================
 local function findAllPlants()
-    local allPlants = {}
-    local seenObjects = {}
+    local merged = {}
+    local seen = {}
     
-    -- Metode 1: GetDescendants
     local descPlants = findPlantsByDescendants()
-    for _, plant in ipairs(descPlants) do
-        if not seenObjects[plant.obj] then
-            seenObjects[plant.obj] = true
-            table.insert(allPlants, plant)
+    for _, p in ipairs(descPlants) do
+        if p.obj and not seen[p.obj] then
+            seen[p.obj] = true
+            table.insert(merged, p)
         end
     end
     
-    -- Metode 2: CollectionService Tags
     local tagPlants = findPlantsByTags()
-    for _, plant in ipairs(tagPlants) do
-        if not seenObjects[plant.obj] then
-            seenObjects[plant.obj] = true
-            table.insert(allPlants, plant)
+    for _, p in ipairs(tagPlants) do
+        if p.obj and not seen[p.obj] then
+            seen[p.obj] = true
+            table.insert(merged, p)
         end
     end
     
-    return allPlants
+    return merged
 end
 
--- ============================================================
--- SERVER-SIDE REMOTE EVENT HARVEST
--- ============================================================
+--==============================================================================
+-- SECTION 10 : REMOTE HARVEST
+--==============================================================================
 local function tryRemoteHarvest(plant)
-    if not CONFIG.USE_REMOTE_EVENT then return false end
+    if not plant or not plant.obj then return false end
     
-    local success = false
+    local remoteContainers = {ReplicatedStorage, ServerStorage, ServerScriptService}
+    local fired = false
     
-    -- Scan ReplicatedStorage buat RemoteEvent harvest
-    pcall(function()
-        for _, obj in ipairs(ReplicatedStorage:GetDescendants()) do
-            if obj:IsA("RemoteEvent") or obj:IsA("RemoteFunction") then
-                local nameLower = string.lower(obj.Name)
-                if string.find(nameLower, "harvest") 
-                    or string.find(nameLower, "collect")
-                    or string.find(nameLower, "plant")
-                    or string.find(nameLower, "gather")
-                    or string.find(nameLower, "pickup")
-                    or string.find(nameLower, "grab") then
-                    
-                    pcall(function()
-                        if obj:IsA("RemoteEvent") then
-                            obj:FireServer(plant.obj)
-                        elseif obj:IsA("RemoteFunction") then
-                            obj:InvokeServer(plant.obj)
+    for _, container in ipairs(remoteContainers) do
+        local ok, children = pcall(function()
+            return container:GetDescendants()
+        end)
+        
+        if ok and children then
+            for _, obj in ipairs(children) do
+                if not fired and obj and (obj:IsA("RemoteEvent") or obj:IsA("RemoteFunction")) then
+                    local lowerName = string.lower(obj.Name)
+                    for _, keyword in ipairs(CONFIG.REMOTE_KEYWORDS) do
+                        if string.find(lowerName, keyword, 1, true) then
+                            pcall(function()
+                                if obj:IsA("RemoteEvent") then
+                                    obj:FireServer(plant.obj)
+                                    obj:FireServer(plant.root)
+                                    obj:FireServer(plant.obj, plant.root)
+                                elseif obj:IsA("RemoteFunction") then
+                                    obj:InvokeServer(plant.obj)
+                                end
+                            end)
+                            fired = true
+                            break
                         end
-                        success = true
-                    end)
+                    end
                 end
             end
         end
-    end)
+    end
     
-    -- Scan object plant sendiri buat RemoteEvent
-    pcall(function()
-        for _, child in ipairs(plant.obj:GetDescendants()) do
-            if child:IsA("RemoteEvent") then
-                pcall(function()
-                    child:FireServer()
-                    success = true
-                end)
+    -- Scan remotes inside plant object
+    if not fired and plant.obj then
+        local ok2, inside = pcall(function()
+            return plant.obj:GetDescendants()
+        end)
+        if ok2 and inside then
+            for _, obj in ipairs(inside) do
+                if obj:IsA("RemoteEvent") or obj:IsA("RemoteFunction") then
+                    pcall(function()
+                        if obj:IsA("RemoteEvent") then
+                            obj:FireServer()
+                            obj:FireServer(plant.obj)
+                        elseif obj:IsA("RemoteFunction") then
+                            obj:InvokeServer()
+                        end
+                    end)
+                    fired = true
+                end
             end
         end
-    end)
+    end
+    
+    return fired
+end
+
+--==============================================================================
+-- SECTION 11 : HARVEST PLANT - 5 METHODS
+--==============================================================================
+local function harvestPlant(plant)
+    if not plant or not plant.obj or not plant.obj.Parent then
+        return false
+    end
+    
+    if not plant.root or not plant.root.Parent then
+        return false
+    end
+    
+    local success = false
+    
+    -- METHOD 1 : Force ProximityPrompt
+    local prompt = plant.obj:FindFirstChildOfClass("ProximityPrompt")
+    if not prompt and plant.obj:IsA("Model") then
+        prompt = plant.obj:FindFirstChildWhichIsA("ProximityPrompt", true)
+    end
+    
+    if prompt then
+        pcall(function()
+            prompt.MaxActivationDistance = CONFIG.FORCE_DISTANCE
+            prompt.HoldDuration = 0
+            prompt.RequiresLineOfSight = false
+            prompt.Enabled = true
+        end)
+        
+        pcall(function()
+            fireproximityprompt(prompt)
+        end)
+        
+        success = true
+    end
+    
+    -- METHOD 2 : ProximityPrompt Recursive (fallback deeper)
+    if not success then
+        local deepPrompt = nil
+        pcall(function()
+            deepPrompt = plant.obj:FindFirstChildWhichIsA("ProximityPrompt", true)
+        end)
+        
+        if deepPrompt then
+            pcall(function()
+                deepPrompt.MaxActivationDistance = CONFIG.FORCE_DISTANCE
+                deepPrompt.HoldDuration = 0
+                deepPrompt.RequiresLineOfSight = false
+                deepPrompt.Enabled = true
+            end)
+            pcall(function()
+                fireproximityprompt(deepPrompt)
+            end)
+            success = true
+        end
+    end
+    
+    -- METHOD 3 : Force ClickDetector
+    if not success then
+        local cd = plant.obj:FindFirstChildOfClass("ClickDetector")
+        if cd then
+            pcall(function()
+                cd.MaxActivationDistance = CONFIG.FORCE_DISTANCE
+            end)
+            pcall(function()
+                fireclickdetector(cd)
+            end)
+            success = true
+        end
+    end
+    
+    -- METHOD 4 : ClickDetector Recursive
+    if not success then
+        local deepCd = nil
+        pcall(function()
+            deepCd = plant.obj:FindFirstChildWhichIsA("ClickDetector", true)
+        end)
+        if deepCd then
+            pcall(function()
+                deepCd.MaxActivationDistance = CONFIG.FORCE_DISTANCE
+            end)
+            pcall(function()
+                fireclickdetector(deepCd)
+            end)
+            success = true
+        end
+    end
+    
+    -- METHOD 5 : RemoteEvent / RemoteFunction
+    if not success then
+        success = tryRemoteHarvest(plant)
+    end
     
     return success
 end
 
--- ============================================================
--- HARVEST SATU PLANT
--- ============================================================
-local function harvestPlant(plant)
-    if not plant or not plant.obj or not plant.obj.Parent then return false end
-    
-    local harvested = false
-    
-    -- ═══ METODE 1: ProximityPrompt (LANGSUNG) ═══
-    if plant.prompt then
-        pcall(function()
-            if CONFIG.FORCE_PROMPT_DISTANCE then
-                plant.prompt.MaxActivationDistance = math.huge
-                plant.prompt.HoldDuration = 0
-                plant.prompt.RequiresLineOfSight = false
-            end
-            fireproximityprompt(plant.prompt)
-            harvested = true
-        end)
-    end
-    
-    -- ═══ METODE 2: ClickDetector ═══
-    if not harvested and plant.clickDetector then
-        pcall(function()
-            plant.clickDetector.MaxActivationDistance = math.huge
-            fireclickdetector(plant.clickDetector)
-            harvested = true
-        end)
-    end
-    
-    -- ═══ METODE 3: RemoteEvent ═══
-    if not harvested and CONFIG.USE_REMOTE_EVENT then
-        local remoteSuccess = tryRemoteHarvest(plant)
-        if remoteSuccess then
-            harvested = true
-        end
-    end
-    
-    return harvested
-end
-
--- ============================================================
--- BATCH PROCESSING (PROSES BANYAK SEKALIGUS)
--- ============================================================
-local function batchHarvest()
-    local originalCFrame = nil
-    if humanoidRootPart and humanoidRootPart.Parent then
-        originalCFrame = humanoidRootPart.CFrame
-    end
-    
-    local plants = findAllPlants()
-    local totalFound = #plants
-    
-    if totalFound == 0 then
-        return 0, totalFound
-    end
-    
-    log("Mass Harvest: " .. totalFound .. " plants found", Color3.fromRGB(150, 255, 100))
+--==============================================================================
+-- SECTION 12 : BATCH PROCESSING
+--==============================================================================
+local function batchHarvest(plants)
+    if not plants or #plants == 0 then return 0 end
     
     local totalHarvested = 0
+    local totalBatches = math.ceil(#plants / CONFIG.BATCH_SIZE)
     
-    -- Process in batches
-    local batchCount = math.ceil(totalFound / CONFIG.BATCH_SIZE)
-    
-    for batchIndex = 1, batchCount do
-        if not isHarvesting then break end
-        
+    for batchIndex = 1, totalBatches do
         local startIdx = (batchIndex - 1) * CONFIG.BATCH_SIZE + 1
-        local endIdx = math.min(batchIndex * CONFIG.BATCH_SIZE, totalFound)
+        local endIdx = math.min(batchIndex * CONFIG.BATCH_SIZE, #plants)
         
         for i = startIdx, endIdx do
-            if not isHarvesting then break end
-            
             local plant = plants[i]
             if plant and plant.obj and plant.obj.Parent then
+                local ok = pcall(function()
+                    harvestPlant(plant)
+                end)
                 
-                -- Teleport ke plant (kalo perlu)
-                if CONFIG.USE_TELEPORT and humanoidRootPart and plant.root then
-                    pcall(function()
-                        humanoidRootPart.CFrame = CFrame.new(plant.root.Position + Vector3.new(0, 3, 0))
-                        humanoidRootPart.Velocity = Vector3.new(0, 0, 0)
-                    end)
-                    task.wait(CONFIG.TELEPORT_DELAY)
-                end
-                
-                -- Harvest
-                if harvestPlant(plant) then
+                if ok then
                     totalHarvested = totalHarvested + 1
                     
-                    -- Update stats per jenis
-                    if string.find(string.lower(plant.name), "ginseng") then
+                    local plantType = plant.type or "Unknown"
+                    if plantType == "Ginseng" then
                         stats.ginseng = stats.ginseng + 1
-                    elseif string.find(string.lower(plant.name), "spirit") then
+                    elseif plantType == "Spirit Grass" then
                         stats.spiritGrass = stats.spiritGrass + 1
                     end
                 end
@@ -421,539 +485,487 @@ local function batchHarvest()
             end
         end
         
-        -- Delay antar batch
         task.wait(CONFIG.BATCH_DELAY)
     end
     
-    -- Balik ke posisi awal
-    if CONFIG.USE_TELEPORT then
-        pcall(function()
-            if originalCFrame and humanoidRootPart and humanoidRootPart.Parent then
-                humanoidRootPart.CFrame = originalCFrame
-                humanoidRootPart.Velocity = Vector3.new(0, 0, 0)
-            end
-        end)
+    return totalHarvested
+end
+
+--==============================================================================
+-- SECTION 13 : MASS HARVEST WRAPPER
+--==============================================================================
+local function doMassHarvest()
+    if STATE.isHarvesting then
+        log("Harvest sudah berjalan, tunggu selesai.", "warn")
+        return
     end
     
-    return totalHarvested, totalFound
-end
-
--- ============================================================
--- MASS HARVEST SINGLE CALL
--- ============================================================
-local function doMassHarvest()
-    if isHarvesting then return end
-    isHarvesting = true
+    STATE.isHarvesting = true
+    local startTime = tick()
     
-    stats.startTime = tick()
-    log("=== MASS HARVEST STARTED ===", Color3.fromRGB(0, 255, 100))
+    log("Scanning plants di seluruh map...", "info")
     
-    local harvested, found = batchHarvest()
+    local plants = findAllPlants()
+    stats.lastScanCount = #plants
+    
+    log("Ditemukan " .. tostring(#plants) .. " plants", "info")
+    
+    if #plants == 0 then
+        log("Tidak ada plant yang ditemukan.", "warn")
+        STATE.isHarvesting = false
+        return
+    end
+    
+    log("Memulai mass harvest " .. tostring(#plants) .. " plants...", "info")
+    
+    local harvested = batchHarvest(plants)
     
     stats.collected = stats.collected + harvested
-    stats.lastScanCount = found
+    stats.lastDuration = tick() - startTime
     
-    log("Harvested: " .. harvested .. "/" .. found, Color3.fromRGB(100, 255, 150))
+    log("Harvest selesai: " .. tostring(harvested) .. " plants dalam " .. string.format("%.2f", stats.lastDuration) .. "s", "success")
     
-    isHarvesting = false
+    STATE.isHarvesting = false
 end
 
--- ============================================================
--- AUTO LOOP
--- ============================================================
+--==============================================================================
+-- SECTION 14 : AUTO LOOP
+--==============================================================================
 local function startAutoLoop()
-    if autoLoop then return end
-    autoLoop = true
+    if STATE.autoLoopThread then
+        task.cancel(STATE.autoLoopThread)
+        STATE.autoLoopThread = nil
+    end
     
-    log("Auto Loop STARTED", Color3.fromRGB(0, 200, 255))
+    STATE.autoLoopActive = true
     
-    task.spawn(function()
-        while autoLoop do
-            if not isHarvesting then
+    STATE.autoLoopThread = task.spawn(function()
+        while STATE.autoLoopActive do
+            pcall(function()
                 doMassHarvest()
+            end)
+            
+            local waited = 0
+            while waited < CONFIG.AUTO_SCAN_INTERVAL and STATE.autoLoopActive do
+                task.wait(0.1)
+                waited = waited + 0.1
             end
-            task.wait(CONFIG.AUTO_SCAN_INTERVAL)
         end
     end)
+    
+    log("Auto loop: ON (interval " .. tostring(CONFIG.AUTO_SCAN_INTERVAL) .. "s)", "success")
 end
 
 local function stopAutoLoop()
-    autoLoop = false
-    log("Auto Loop STOPPED", Color3.fromRGB(255, 150, 100))
+    STATE.autoLoopActive = false
+    if STATE.autoLoopThread then
+        pcall(function()
+            task.cancel(STATE.autoLoopThread)
+        end)
+        STATE.autoLoopThread = nil
+    end
+    log("Auto loop: OFF", "warn")
 end
 
--- ============================================================
--- GUI - HORIZONTAL LAYOUT
--- ============================================================
-local ScreenGui = Instance.new("ScreenGui")
-ScreenGui.Name = "MassHarvestGUI"
-ScreenGui.ResetOnSpawn = false
-ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-ScreenGui.Parent = player:WaitForChild("PlayerGui")
+--==============================================================================
+-- SECTION 15 : GUI SETUP
+--==============================================================================
+local function createGUI()
+    -- ScreenGui
+    local screenGui = Instance.new("ScreenGui")
+    screenGui.Name = "TrueMassHarvest_ADIEL"
+    screenGui.ResetOnSpawn = false
+    screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    screenGui.IgnoreGuiInset = true
+    screenGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+    GUI_REFS.ScreenGui = screenGui
+    
+    -- Main Frame
+    local mainFrame = Instance.new("Frame")
+    mainFrame.Name = "MainFrame"
+    mainFrame.Size = UDim2.new(0, 680, 0, 260)
+    mainFrame.Position = UDim2.new(0.5, -340, 0.5, -130)
+    mainFrame.BackgroundColor3 = Color3.fromRGB(15, 15, 20)
+    mainFrame.BorderSizePixel = 0
+    mainFrame.Active = true
+    mainFrame.Parent = screenGui
+    GUI_REFS.MainFrame = mainFrame
+    
+    local mainCorner = Instance.new("UICorner")
+    mainCorner.CornerRadius = UDim.new(0, 10)
+    mainCorner.Parent = mainFrame
+    
+    local mainStroke = Instance.new("UIStroke")
+    mainStroke.Color = Color3.fromRGB(40, 40, 55)
+    mainStroke.Thickness = 1
+    mainStroke.Parent = mainFrame
+    
+    -- Title Bar
+    local titleBar = Instance.new("Frame")
+    titleBar.Name = "TitleBar"
+    titleBar.Size = UDim2.new(1, 0, 0, 35)
+    titleBar.Position = UDim2.new(0, 0, 0, 0)
+    titleBar.BackgroundColor3 = Color3.fromRGB(22, 22, 32)
+    titleBar.BorderSizePixel = 0
+    titleBar.Active = true
+    titleBar.Parent = mainFrame
+    
+    local titleCorner = Instance.new("UICorner")
+    titleCorner.CornerRadius = UDim.new(0, 10)
+    titleCorner.Parent = titleBar
+    
+    local titleMask = Instance.new("Frame")
+    titleMask.Size = UDim2.new(1, 0, 0, 12)
+    titleMask.Position = UDim2.new(0, 0, 1, -12)
+    titleMask.BackgroundColor3 = Color3.fromRGB(22, 22, 32)
+    titleMask.BorderSizePixel = 0
+    titleMask.Parent = titleBar
+    
+    local titleLabel = Instance.new("TextLabel")
+    titleLabel.Size = UDim2.new(1, -90, 1, 0)
+    titleLabel.Position = UDim2.new(0, 12, 0, 0)
+    titleLabel.BackgroundTransparency = 1
+    titleLabel.Text = "TRUE MASS HARVEST v6.1 - Script Created by ADIEL"
+    titleLabel.TextColor3 = Color3.fromRGB(0, 220, 130)
+    titleLabel.TextSize = 13
+    titleLabel.Font = Enum.Font.GothamBold
+    titleLabel.TextXAlignment = Enum.TextXAlignment.Left
+    titleLabel.Parent = titleBar
+    
+    -- Minimize Button
+    local minBtn = Instance.new("TextButton")
+    minBtn.Size = UDim2.new(0, 30, 0, 25)
+    minBtn.Position = UDim2.new(1, -70, 0, 5)
+    minBtn.BackgroundColor3 = Color3.fromRGB(50, 50, 70)
+    minBtn.BorderSizePixel = 0
+    minBtn.Text = "_"
+    minBtn.TextColor3 = Color3.fromRGB(220, 220, 220)
+    minBtn.TextSize = 16
+    minBtn.Font = Enum.Font.GothamBold
+    minBtn.Parent = titleBar
+    GUI_REFS.Buttons.minBtn = minBtn
+    
+    local minCorner = Instance.new("UICorner")
+    minCorner.CornerRadius = UDim.new(0, 5)
+    minCorner.Parent = minBtn
+    
+    -- Close Button
+    local closeBtn = Instance.new("TextButton")
+    closeBtn.Size = UDim2.new(0, 30, 0, 25)
+    closeBtn.Position = UDim2.new(1, -36, 0, 5)
+    closeBtn.BackgroundColor3 = Color3.fromRGB(180, 50, 50)
+    closeBtn.BorderSizePixel = 0
+    closeBtn.Text = "X"
+    closeBtn.TextColor3 = Color3.fromRGB(240, 240, 240)
+    closeBtn.TextSize = 14
+    closeBtn.Font = Enum.Font.GothamBold
+    closeBtn.Parent = titleBar
+    GUI_REFS.Buttons.closeBtn = closeBtn
+    
+    local closeCorner = Instance.new("UICorner")
+    closeCorner.CornerRadius = UDim.new(0, 5)
+    closeCorner.Parent = closeBtn
+    
+    --==============================================================
+    -- COLUMN 1 : STATISTIK
+    --==============================================================
+    local col1 = Instance.new("Frame")
+    col1.Name = "Col1_Stats"
+    col1.Size = UDim2.new(0, 200, 0, 210)
+    col1.Position = UDim2.new(0, 12, 0, 42)
+    col1.BackgroundColor3 = Color3.fromRGB(20, 20, 28)
+    col1.BorderSizePixel = 0
+    col1.Parent = mainFrame
+    
+    local col1Corner = Instance.new("UICorner")
+    col1Corner.CornerRadius = UDim.new(0, 8)
+    col1Corner.Parent = col1
+    
+    local col1Title = Instance.new("TextLabel")
+    col1Title.Size = UDim2.new(1, -16, 0, 22)
+    col1Title.Position = UDim2.new(0, 8, 0, 6)
+    col1Title.BackgroundTransparency = 1
+    col1Title.Text = "STATISTIK"
+    col1Title.TextColor3 = Color3.fromRGB(0, 200, 255)
+    col1Title.TextSize = 14
+    col1Title.Font = Enum.Font.GothamBold
+    col1Title.TextXAlignment = Enum.TextXAlignment.Left
+    col1Title.Parent = col1
+    
+    local function makeStatLabel(name, yPos, color)
+        local lbl = Instance.new("TextLabel")
+        lbl.Name = name
+        lbl.Size = UDim2.new(1, -16, 0, 20)
+        lbl.Position = UDim2.new(0, 8, 0, yPos)
+        lbl.BackgroundTransparency = 1
+        lbl.Text = name .. ": 0"
+        lbl.TextColor3 = color
+        lbl.TextSize = 12
+        lbl.Font = Enum.Font.Code
+        lbl.TextXAlignment = Enum.TextXAlignment.Left
+        lbl.Parent = col1
+        return lbl
+    end
+    
+    GUI_REFS.Labels.total      = makeStatLabel("Total", 34, Color3.fromRGB(0, 220, 130))
+    GUI_REFS.Labels.total.TextSize = 14
+    GUI_REFS.Labels.ginseng    = makeStatLabel("Ginseng", 58, Color3.fromRGB(140, 220, 140))
+    GUI_REFS.Labels.spirit     = makeStatLabel("Spirit Grass", 80, Color3.fromRGB(140, 220, 140))
+    GUI_REFS.Labels.lastScan   = makeStatLabel("Last Scan", 102, Color3.fromRGB(180, 180, 200))
+    GUI_REFS.Labels.duration   = makeStatLabel("Duration", 124, Color3.fromRGB(180, 180, 200))
+    GUI_REFS.Labels.status     = makeStatLabel("Status", 150, Color3.fromRGB(0, 220, 130))
+    GUI_REFS.Labels.status.Text = "Status: IDLE"
+    
+    --==============================================================
+    -- COLUMN 2 : ACTIONS
+    --==============================================================
+    local col2 = Instance.new("Frame")
+    col2.Name = "Col2_Actions"
+    col2.Size = UDim2.new(0, 220, 0, 210)
+    col2.Position = UDim2.new(0, 224, 0, 42)
+    col2.BackgroundColor3 = Color3.fromRGB(20, 20, 28)
+    col2.BorderSizePixel = 0
+    col2.Parent = mainFrame
+    
+    local col2Corner = Instance.new("UICorner")
+    col2Corner.CornerRadius = UDim.new(0, 8)
+    col2Corner.Parent = col2
+    
+    local col2Title = Instance.new("TextLabel")
+    col2Title.Size = UDim2.new(1, -16, 0, 22)
+    col2Title.Position = UDim2.new(0, 8, 0, 6)
+    col2Title.BackgroundTransparency = 1
+    col2Title.Text = "MASS HARVEST"
+    col2Title.TextColor3 = Color3.fromRGB(0, 200, 255)
+    col2Title.TextSize = 14
+    col2Title.Font = Enum.Font.GothamBold
+    col2Title.TextXAlignment = Enum.TextXAlignment.Left
+    col2Title.Parent = col2
+    
+    local function makeButton(name, text, yPos, height, color)
+        local btn = Instance.new("TextButton")
+        btn.Name = name
+        btn.Size = UDim2.new(1, -16, 0, height)
+        btn.Position = UDim2.new(0, 8, 0, yPos)
+        btn.BackgroundColor3 = color
+        btn.BorderSizePixel = 0
+        btn.Text = text
+        btn.TextColor3 = Color3.fromRGB(240, 240, 240)
+        btn.TextSize = 13
+        btn.Font = Enum.Font.GothamBold
+        btn.Parent = col2
+        
+        local corner = Instance.new("UICorner")
+        corner.CornerRadius = UDim.new(0, 6)
+        corner.Parent = btn
+        
+        return btn
+    end
+    
+    GUI_REFS.Buttons.harvestAll = makeButton("HarvestAll", "HARVEST ALL SEKARANG", 34, 45, Color3.fromRGB(0, 160, 90))
+    GUI_REFS.Buttons.autoLoop   = makeButton("AutoLoop", "AUTO LOOP: OFF", 86, 30, Color3.fromRGB(0, 110, 180))
+    GUI_REFS.Buttons.scan       = makeButton("Scan", "SCAN PLANTS", 122, 30, Color3.fromRGB(60, 50, 90))
+    GUI_REFS.Buttons.reset      = makeButton("Reset", "RESET STATS", 158, 30, Color3.fromRGB(70, 40, 40))
+    GUI_REFS.Buttons.console    = makeButton("Console", "OPEN CONSOLE", 194, 12, Color3.fromRGB(35, 60, 35))
+    GUI_REFS.Buttons.console.TextSize = 10
+    
+    --==============================================================
+    -- COLUMN 3 : INFO
+    --==============================================================
+    local col3 = Instance.new("Frame")
+    col3.Name = "Col3_Info"
+    col3.Size = UDim2.new(0, 200, 0, 210)
+    col3.Position = UDim2.new(0, 456, 0, 42)
+    col3.BackgroundColor3 = Color3.fromRGB(20, 20, 28)
+    col3.BorderSizePixel = 0
+    col3.Parent = mainFrame
+    
+    local col3Corner = Instance.new("UICorner")
+    col3Corner.CornerRadius = UDim.new(0, 8)
+    col3Corner.Parent = col3
+    
+    local col3Title = Instance.new("TextLabel")
+    col3Title.Size = UDim2.new(1, -16, 0, 22)
+    col3Title.Position = UDim2.new(0, 8, 0, 6)
+    col3Title.BackgroundTransparency = 1
+    col3Title.Text = "INFORMASI"
+    col3Title.TextColor3 = Color3.fromRGB(0, 200, 255)
+    col3Title.TextSize = 14
+    col3Title.Font = Enum.Font.GothamBold
+    col3Title.TextXAlignment = Enum.TextXAlignment.Left
+    col3Title.Parent = col3
+    
+    local infoText = Instance.new("TextLabel")
+    infoText.Size = UDim2.new(1, -16, 0, 130)
+    infoText.Position = UDim2.new(0, 8, 0, 32)
+    infoText.BackgroundTransparency = 1
+    infoText.Text = "Plants:\n- Ginseng\n- Spirit Grass\n\nDetection:\n- GetDescendants\n- CollectionService\n- Batch Processing\n\nMode: NO TELEPORT"
+    infoText.TextColor3 = Color3.fromRGB(180, 180, 200)
+    infoText.TextSize = 11
+    infoText.Font = Enum.Font.Code
+    infoText.TextXAlignment = Enum.TextXAlignment.Left
+    infoText.TextYAlignment = Enum.TextYAlignment.Top
+    infoText.Parent = col3
+    
+    local creditLabel = Instance.new("TextLabel")
+    creditLabel.Size = UDim2.new(1, -16, 0, 20)
+    creditLabel.Position = UDim2.new(0, 8, 1, -26)
+    creditLabel.BackgroundTransparency = 1
+    creditLabel.Text = "Script Created by ADIEL"
+    creditLabel.TextColor3 = Color3.fromRGB(100, 100, 130)
+    creditLabel.TextSize = 11
+    creditLabel.Font = Enum.Font.Gotham
+    creditLabel.TextXAlignment = Enum.TextXAlignment.Left
+    creditLabel.Parent = col3
+    
+    return screenGui
+end
 
--- MAIN FRAME
-local MainFrame = Instance.new("Frame")
-MainFrame.Size = UDim2.new(0, 680, 0, 260)
-MainFrame.Position = UDim2.new(0.5, -340, 0.5, -130)
-MainFrame.BackgroundColor3 = Color3.fromRGB(15, 15, 20)
-MainFrame.BorderSizePixel = 0
-MainFrame.Active = true
-MainFrame.Visible = true
-MainFrame.Parent = ScreenGui
+--==============================================================================
+-- SECTION 16 : POPUP CONSOLE + FLOATING BUBBLE
+--==============================================================================
+local function createConsolePopup()
+    local consoleFrame = Instance.new("Frame")
+    consoleFrame.Name = "ConsolePopup"
+    consoleFrame.Size = UDim2.new(0, 340, 0, 260)
+    consoleFrame.Position = UDim2.new(0.5, -170, 0.5, -130)
+    consoleFrame.BackgroundColor3 = Color3.fromRGB(15, 15, 20)
+    consoleFrame.BorderSizePixel = 0
+    consoleFrame.Visible = false
+    consoleFrame.Active = true
+    consoleFrame.ZIndex = 50
+    consoleFrame.Parent = GUI_REFS.ScreenGui
+    GUI_REFS.Console = consoleFrame
+    
+    local consoleCorner = Instance.new("UICorner")
+    consoleCorner.CornerRadius = UDim.new(0, 10)
+    consoleCorner.Parent = consoleFrame
+    
+    local consoleStroke = Instance.new("UIStroke")
+    consoleStroke.Color = Color3.fromRGB(60, 100, 60)
+    consoleStroke.Thickness = 1
+    consoleStroke.Parent = consoleFrame
+    
+    -- Console Title Bar
+    local consoleTitle = Instance.new("Frame")
+    consoleTitle.Name = "ConsoleTitle"
+    consoleTitle.Size = UDim2.new(1, 0, 0, 30)
+    consoleTitle.BackgroundColor3 = Color3.fromRGB(22, 32, 22)
+    consoleTitle.BorderSizePixel = 0
+    consoleTitle.Active = true
+    consoleTitle.Parent = consoleFrame
+    
+    local consoleTitleCorner = Instance.new("UICorner")
+    consoleTitleCorner.CornerRadius = UDim.new(0, 10)
+    consoleTitleCorner.Parent = consoleTitle
+    
+    local consoleTitleText = Instance.new("TextLabel")
+    consoleTitleText.Size = UDim2.new(1, -80, 1, 0)
+    consoleTitleText.Position = UDim2.new(0, 10, 0, 0)
+    consoleTitleText.BackgroundTransparency = 1
+    consoleTitleText.Text = "CONSOLE LOG"
+    consoleTitleText.TextColor3 = Color3.fromRGB(0, 220, 130)
+    consoleTitleText.TextSize = 12
+    consoleTitleText.Font = Enum.Font.GothamBold
+    consoleTitleText.TextXAlignment = Enum.TextXAlignment.Left
+    consoleTitleText.Parent = consoleTitle
+    
+    local clearBtn = Instance.new("TextButton")
+    clearBtn.Size = UDim2.new(0, 45, 0, 22)
+    clearBtn.Position = UDim2.new(1, -76, 0, 4)
+    clearBtn.BackgroundColor3 = Color3.fromRGB(50, 50, 70)
+    clearBtn.BorderSizePixel = 0
+    clearBtn.Text = "CLEAR"
+    clearBtn.TextColor3 = Color3.fromRGB(220, 220, 220)
+    clearBtn.TextSize = 10
+    clearBtn.Font = Enum.Font.GothamBold
+    clearBtn.Parent = consoleTitle
+    GUI_REFS.Buttons.clearBtn = clearBtn
+    
+    local clearCorner = Instance.new("UICorner")
+    clearCorner.CornerRadius = UDim.new(0, 4)
+    clearCorner.Parent = clearBtn
+    
+    local closeConsoleBtn = Instance.new("TextButton")
+    closeConsoleBtn.Size = UDim2.new(0, 22, 0, 22)
+    closeConsoleBtn.Position = UDim2.new(1, -26, 0, 4)
+    closeConsoleBtn.BackgroundColor3 = Color3.fromRGB(180, 50, 50)
+    closeConsoleBtn.BorderSizePixel = 0
+    closeConsoleBtn.Text = "X"
+    closeConsoleBtn.TextColor3 = Color3.fromRGB(240, 240, 240)
+    closeConsoleBtn.TextSize = 11
+    closeConsoleBtn.Font = Enum.Font.GothamBold
+    closeConsoleBtn.Parent = consoleTitle
+    GUI_REFS.Buttons.closeConsole = closeConsoleBtn
+    
+    local closeConsoleCorner = Instance.new("UICorner")
+    closeConsoleCorner.CornerRadius = UDim.new(0, 4)
+    closeConsoleCorner.Parent = closeConsoleBtn
+    
+    -- Scrolling Frame
+    local scroll = Instance.new("ScrollingFrame")
+    scroll.Name = "LogScroll"
+    scroll.Size = UDim2.new(1, -16, 1, -42)
+    scroll.Position = UDim2.new(0, 8, 0, 34)
+    scroll.BackgroundColor3 = Color3.fromRGB(10, 10, 15)
+    scroll.BorderSizePixel = 0
+    scroll.ScrollBarThickness = 4
+    scroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+    scroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+    scroll.Parent = consoleFrame
+    GUI_REFS.LogFrame = scroll
+    
+    local scrollCorner = Instance.new("UICorner")
+    scrollCorner.CornerRadius = UDim.new(0, 6)
+    scrollCorner.Parent = scroll
+    
+    local logPadding = Instance.new("UIPadding")
+    logPadding.PaddingTop = UDim.new(0, 4)
+    logPadding.PaddingBottom = UDim.new(0, 4)
+    logPadding.PaddingLeft = UDim.new(0, 4)
+    logPadding.PaddingRight = UDim.new(0, 4)
+    logPadding.Parent = scroll
+    
+    local logLayout = Instance.new("UIListLayout")
+    logLayout.SortOrder = Enum.SortOrder.LayoutOrder
+    logLayout.Padding = UDim.new(0, 2)
+    logLayout.Parent = scroll
+    GUI_REFS.LogLayout = logLayout
+    
+    -- Bubble
+    local bubble = Instance.new("TextButton")
+    bubble.Name = "FloatingBubble"
+    bubble.Size = UDim2.new(0, 50, 0, 50)
+    bubble.Position = UDim2.new(0, 20, 0.5, -25)
+    bubble.BackgroundColor3 = Color3.fromRGB(0, 160, 90)
+    bubble.BorderSizePixel = 0
+    bubble.Text = "H"
+    bubble.TextColor3 = Color3.fromRGB(240, 240, 240)
+    bubble.TextSize = 22
+    bubble.Font = Enum.Font.GothamBold
+    bubble.Visible = false
+    bubble.Active = true
+    bubble.ZIndex = 40
+    bubble.Parent = GUI_REFS.ScreenGui
+    GUI_REFS.Bubble = bubble
+    
+    local bubbleCorner = Instance.new("UICorner")
+    bubbleCorner.CornerRadius = UDim.new(1, 0)
+    bubbleCorner.Parent = bubble
+end
 
-local MainCorner = Instance.new("UICorner")
-MainCorner.CornerRadius = UDim.new(0, 10)
-MainCorner.Parent = MainFrame
-
-local MainStroke = Instance.new("UIStroke")
-MainStroke.Color = Color3.fromRGB(40, 40, 55)
-MainStroke.Thickness = 1
-MainStroke.Parent = MainFrame
-
--- TITLE BAR
-local TitleBar = Instance.new("Frame")
-TitleBar.Size = UDim2.new(1, 0, 0, 35)
-TitleBar.BackgroundColor3 = Color3.fromRGB(22, 22, 32)
-TitleBar.BorderSizePixel = 0
-TitleBar.Active = true
-TitleBar.Parent = MainFrame
-
-local TitleBarCorner = Instance.new("UICorner")
-TitleBarCorner.CornerRadius = UDim.new(0, 10)
-TitleBarCorner.Parent = TitleBar
-
-local Title = Instance.new("TextLabel")
-Title.Size = UDim2.new(1, -80, 1, 0)
-Title.Position = UDim2.new(0, 12, 0, 0)
-Title.BackgroundTransparency = 1
-Title.TextColor3 = Color3.fromRGB(0, 220, 130)
-Title.Text = "MASS HARVEST v6.0 - Script Created by ADIEL"
-Title.TextSize = 13
-Title.Font = Enum.Font.GothamBold
-Title.TextXAlignment = Enum.TextXAlignment.Left
-Title.Parent = TitleBar
-
-local MinBtn = Instance.new("TextButton")
-MinBtn.Size = UDim2.new(0, 26, 0, 26)
-MinBtn.Position = UDim2.new(1, -60, 0, 4)
-MinBtn.BackgroundColor3 = Color3.fromRGB(50, 50, 70)
-MinBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-MinBtn.Text = "_"
-MinBtn.TextSize = 14
-MinBtn.Font = Enum.Font.GothamBold
-MinBtn.Parent = TitleBar
-
-local MinCorner = Instance.new("UICorner")
-MinCorner.CornerRadius = UDim.new(0, 5)
-MinCorner.Parent = MinBtn
-
-local CloseBtn = Instance.new("TextButton")
-CloseBtn.Size = UDim2.new(0, 26, 0, 26)
-CloseBtn.Position = UDim2.new(1, -30, 0, 4)
-CloseBtn.BackgroundColor3 = Color3.fromRGB(180, 50, 50)
-CloseBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-CloseBtn.Text = "X"
-CloseBtn.TextSize = 13
-CloseBtn.Font = Enum.Font.GothamBold
-CloseBtn.Parent = TitleBar
-
-local CloseCorner = Instance.new("UICorner")
-CloseCorner.CornerRadius = UDim.new(0, 5)
-CloseCorner.Parent = CloseBtn
-
--- ═══════════════════════════════════════════
--- 3 COLUMNS
--- ═══════════════════════════════════════════
-
--- ═══ COLUMN 1: STATS ═══
-local StatsFrame = Instance.new("Frame")
-StatsFrame.Size = UDim2.new(0, 200, 1, -50)
-StatsFrame.Position = UDim2.new(0, 12, 0, 42)
-StatsFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 28)
-StatsFrame.BorderSizePixel = 0
-StatsFrame.Parent = MainFrame
-
-local StatsCorner = Instance.new("UICorner")
-StatsCorner.CornerRadius = UDim.new(0, 8)
-StatsCorner.Parent = StatsFrame
-
-local StatsTitle = Instance.new("TextLabel")
-StatsTitle.Size = UDim2.new(1, -16, 0, 20)
-StatsTitle.Position = UDim2.new(0, 8, 0, 8)
-StatsTitle.BackgroundTransparency = 1
-StatsTitle.TextColor3 = Color3.fromRGB(0, 200, 255)
-StatsTitle.Text = "STATISTIK"
-StatsTitle.TextSize = 11
-StatsTitle.Font = Enum.Font.GothamBold
-StatsTitle.TextXAlignment = Enum.TextXAlignment.Left
-StatsTitle.Parent = StatsFrame
-
-local TotalLabel = Instance.new("TextLabel")
-TotalLabel.Size = UDim2.new(1, -16, 0, 22)
-TotalLabel.Position = UDim2.new(0, 8, 0, 32)
-TotalLabel.BackgroundTransparency = 1
-TotalLabel.TextColor3 = Color3.fromRGB(0, 220, 130)
-TotalLabel.Text = "Total: 0"
-TotalLabel.TextSize = 14
-TotalLabel.Font = Enum.Font.GothamBold
-TotalLabel.TextXAlignment = Enum.TextXAlignment.Left
-TotalLabel.Parent = StatsFrame
-
-local GinsengLabel = Instance.new("TextLabel")
-GinsengLabel.Size = UDim2.new(1, -16, 0, 20)
-GinsengLabel.Position = UDim2.new(0, 8, 0, 58)
-GinsengLabel.BackgroundTransparency = 1
-GinsengLabel.TextColor3 = Color3.fromRGB(140, 220, 140)
-GinsengLabel.Text = "Ginseng: 0"
-GinsengLabel.TextSize = 11
-GinsengLabel.Font = Enum.Font.Gotham
-GinsengLabel.TextXAlignment = Enum.TextXAlignment.Left
-GinsengLabel.Parent = StatsFrame
-
-local SpiritLabel = Instance.new("TextLabel")
-SpiritLabel.Size = UDim2.new(1, -16, 0, 20)
-SpiritLabel.Position = UDim2.new(0, 8, 0, 78)
-SpiritLabel.BackgroundTransparency = 1
-SpiritLabel.TextColor3 = Color3.fromRGB(140, 220, 140)
-SpiritLabel.Text = "Spirit Grass: 0"
-SpiritLabel.TextSize = 11
-SpiritLabel.Font = Enum.Font.Gotham
-SpiritLabel.TextXAlignment = Enum.TextXAlignment.Left
-SpiritLabel.Parent = StatsFrame
-
-local DetectedLabel = Instance.new("TextLabel")
-DetectedLabel.Size = UDim2.new(1, -16, 0, 18)
-DetectedLabel.Position = UDim2.new(0, 8, 0, 105)
-DetectedLabel.BackgroundTransparency = 1
-DetectedLabel.TextColor3 = Color3.fromRGB(140, 140, 180)
-DetectedLabel.Text = "Last Scan: 0 plants"
-DetectedLabel.TextSize = 10
-DetectedLabel.Font = Enum.Font.Gotham
-DetectedLabel.TextXAlignment = Enum.TextXAlignment.Left
-DetectedLabel.Parent = StatsFrame
-
-local TimeLabel = Instance.new("TextLabel")
-TimeLabel.Size = UDim2.new(1, -16, 0, 18)
-TimeLabel.Position = UDim2.new(0, 8, 0, 125)
-TimeLabel.BackgroundTransparency = 1
-TimeLabel.TextColor3 = Color3.fromRGB(140, 140, 180)
-TimeLabel.Text = "Duration: 0s"
-TimeLabel.TextSize = 10
-TimeLabel.Font = Enum.Font.Gotham
-TimeLabel.TextXAlignment = Enum.TextXAlignment.Left
-TimeLabel.Parent = StatsFrame
-
-local StatusLabel = Instance.new("TextLabel")
-StatusLabel.Size = UDim2.new(1, -16, 0, 40)
-StatusLabel.Position = UDim2.new(0, 8, 0, 150)
-StatusLabel.BackgroundTransparency = 1
-StatusLabel.TextColor3 = Color3.fromRGB(255, 100, 100)
-StatusLabel.Text = "Status: IDLE"
-StatusLabel.TextSize = 11
-StatusLabel.Font = Enum.Font.Gotham
-StatusLabel.TextXAlignment = Enum.TextXAlignment.Left
-StatusLabel.TextYAlignment = Enum.TextYAlignment.Top
-StatusLabel.TextWrapped = true
-StatusLabel.Parent = StatsFrame
-
--- ═══ COLUMN 2: ACTIONS ═══
-local ActionsFrame = Instance.new("Frame")
-ActionsFrame.Size = UDim2.new(0, 220, 1, -50)
-ActionsFrame.Position = UDim2.new(0, 224, 0, 42)
-ActionsFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 28)
-ActionsFrame.BorderSizePixel = 0
-ActionsFrame.Parent = MainFrame
-
-local ActionsCorner = Instance.new("UICorner")
-ActionsCorner.CornerRadius = UDim.new(0, 8)
-ActionsCorner.Parent = ActionsFrame
-
-local ActionsTitle = Instance.new("TextLabel")
-ActionsTitle.Size = UDim2.new(1, -16, 0, 20)
-ActionsTitle.Position = UDim2.new(0, 8, 0, 8)
-ActionsTitle.BackgroundTransparency = 1
-ActionsTitle.TextColor3 = Color3.fromRGB(0, 200, 255)
-ActionsTitle.Text = "MASS HARVEST"
-ActionsTitle.TextSize = 11
-ActionsTitle.Font = Enum.Font.GothamBold
-ActionsTitle.TextXAlignment = Enum.TextXAlignment.Left
-ActionsTitle.Parent = ActionsFrame
-
-local HarvestBtn = Instance.new("TextButton")
-HarvestBtn.Size = UDim2.new(1, -16, 0, 45)
-HarvestBtn.Position = UDim2.new(0, 8, 0, 32)
-HarvestBtn.BackgroundColor3 = Color3.fromRGB(0, 160, 90)
-HarvestBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-HarvestBtn.Text = "HARVEST ALL SEKARANG"
-HarvestBtn.TextSize = 13
-HarvestBtn.Font = Enum.Font.GothamBold
-HarvestBtn.Parent = ActionsFrame
-
-local HarvestCorner = Instance.new("UICorner")
-HarvestCorner.CornerRadius = UDim.new(0, 6)
-HarvestCorner.Parent = HarvestBtn
-
-local AutoLoopBtn = Instance.new("TextButton")
-AutoLoopBtn.Size = UDim2.new(1, -16, 0, 38)
-AutoLoopBtn.Position = UDim2.new(0, 8, 0, 85)
-AutoLoopBtn.BackgroundColor3 = Color3.fromRGB(0, 110, 180)
-AutoLoopBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-AutoLoopBtn.Text = "AUTO LOOP: OFF"
-AutoLoopBtn.TextSize = 12
-AutoLoopBtn.Font = Enum.Font.GothamBold
-AutoLoopBtn.Parent = ActionsFrame
-
-local AutoLoopCorner = Instance.new("UICorner")
-AutoLoopCorner.CornerRadius = UDim.new(0, 6)
-AutoLoopCorner.Parent = AutoLoopBtn
-
-local ScanBtn = Instance.new("TextButton")
-ScanBtn.Size = UDim2.new(1, -16, 0, 32)
-ScanBtn.Position = UDim2.new(0, 8, 0, 131)
-ScanBtn.BackgroundColor3 = Color3.fromRGB(60, 50, 90)
-ScanBtn.TextColor3 = Color3.fromRGB(220, 200, 255)
-ScanBtn.Text = "SCAN PLANTS"
-ScanBtn.TextSize = 12
-ScanBtn.Font = Enum.Font.GothamBold
-ScanBtn.Parent = ActionsFrame
-
-local ScanCorner = Instance.new("UICorner")
-ScanCorner.CornerRadius = UDim.new(0, 6)
-ScanCorner.Parent = ScanBtn
-
-local ResetBtn = Instance.new("TextButton")
-ResetBtn.Size = UDim2.new(1, -16, 0, 32)
-ResetBtn.Position = UDim2.new(0, 8, 0, 171)
-ResetBtn.BackgroundColor3 = Color3.fromRGB(70, 40, 40)
-ResetBtn.TextColor3 = Color3.fromRGB(255, 200, 200)
-ResetBtn.Text = "RESET STATS"
-ResetBtn.TextSize = 12
-ResetBtn.Font = Enum.Font.GothamBold
-ResetBtn.Parent = ActionsFrame
-
-local ResetCorner = Instance.new("UICorner")
-ResetCorner.CornerRadius = UDim.new(0, 6)
-ResetCorner.Parent = ResetBtn
-
-local ConsoleBtn = Instance.new("TextButton")
-ConsoleBtn.Size = UDim2.new(1, -16, 0, 32)
-ConsoleBtn.Position = UDim2.new(0, 8, 0, 211)
-ConsoleBtn.BackgroundColor3 = Color3.fromRGB(35, 60, 35)
-ConsoleBtn.TextColor3 = Color3.fromRGB(150, 220, 150)
-ConsoleBtn.Text = "OPEN CONSOLE"
-ConsoleBtn.TextSize = 12
-ConsoleBtn.Font = Enum.Font.GothamBold
-ConsoleBtn.Parent = ActionsFrame
-
-local ConsoleCorner = Instance.new("UICorner")
-ConsoleCorner.CornerRadius = UDim.new(0, 6)
-ConsoleCorner.Parent = ConsoleBtn
-
--- ═══ COLUMN 3: INFO ═══
-local InfoFrame = Instance.new("Frame")
-InfoFrame.Size = UDim2.new(0, 200, 1, -50)
-InfoFrame.Position = UDim2.new(0, 456, 0, 42)
-InfoFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 28)
-InfoFrame.BorderSizePixel = 0
-InfoFrame.Parent = MainFrame
-
-local InfoCorner = Instance.new("UICorner")
-InfoCorner.CornerRadius = UDim.new(0, 8)
-InfoCorner.Parent = InfoFrame
-
-local InfoTitle = Instance.new("TextLabel")
-InfoTitle.Size = UDim2.new(1, -16, 0, 20)
-InfoTitle.Position = UDim2.new(0, 8, 0, 8)
-InfoTitle.BackgroundTransparency = 1
-InfoTitle.TextColor3 = Color3.fromRGB(0, 200, 255)
-InfoTitle.Text = "INFORMASI"
-InfoTitle.TextSize = 11
-InfoTitle.Font = Enum.Font.GothamBold
-InfoTitle.TextXAlignment = Enum.TextXAlignment.Left
-InfoTitle.Parent = InfoFrame
-
-local PlantListTitle = Instance.new("TextLabel")
-PlantListTitle.Size = UDim2.new(1, -16, 0, 18)
-PlantListTitle.Position = UDim2.new(0, 8, 0, 32)
-PlantListTitle.BackgroundTransparency = 1
-PlantListTitle.TextColor3 = Color3.fromRGB(140, 220, 140)
-PlantListTitle.Text = "Plants:"
-PlantListTitle.TextSize = 11
-PlantListTitle.Font = Enum.Font.GothamBold
-PlantListTitle.TextXAlignment = Enum.TextXAlignment.Left
-PlantListTitle.Parent = InfoFrame
-
-local PlantList = Instance.new("TextLabel")
-PlantList.Size = UDim2.new(1, -16, 0, 40)
-PlantList.Position = UDim2.new(0, 8, 0, 52)
-PlantList.BackgroundTransparency = 1
-PlantList.TextColor3 = Color3.fromRGB(200, 200, 220)
-PlantList.Text = "- Ginseng\n- Spirit Grass"
-PlantList.TextSize = 10
-PlantList.Font = Enum.Font.Gotham
-PlantList.TextXAlignment = Enum.TextXAlignment.Left
-PlantList.TextYAlignment = Enum.TextYAlignment.Top
-PlantList.TextWrapped = true
-PlantList.Parent = InfoFrame
-
-local MethodTitle = Instance.new("TextLabel")
-MethodTitle.Size = UDim2.new(1, -16, 0, 18)
-MethodTitle.Position = UDim2.new(0, 8, 0, 100)
-MethodTitle.BackgroundTransparency = 1
-MethodTitle.TextColor3 = Color3.fromRGB(140, 220, 140)
-MethodTitle.Text = "Detection Methods:"
-MethodTitle.TextSize = 11
-MethodTitle.Font = Enum.Font.GothamBold
-MethodTitle.TextXAlignment = Enum.TextXAlignment.Left
-MethodTitle.Parent = InfoFrame
-
-local MethodList = Instance.new("TextLabel")
-MethodList.Size = UDim2.new(1, -16, 0, 60)
-MethodList.Position = UDim2.new(0, 8, 0, 120)
-MethodList.BackgroundTransparency = 1
-MethodList.TextColor3 = Color3.fromRGB(200, 200, 220)
-MethodList.Text = "- GetDescendants()\n- CollectionService\n- Batch Processing"
-MethodList.TextSize = 10
-MethodList.Font = Enum.Font.Gotham
-MethodList.TextXAlignment = Enum.TextXAlignment.Left
-MethodList.TextYAlignment = Enum.TextYAlignment.Top
-MethodList.TextWrapped = true
-MethodList.Parent = InfoFrame
-
-local CreditLabel = Instance.new("TextLabel")
-CreditLabel.Size = UDim2.new(1, -16, 0, 30)
-CreditLabel.Position = UDim2.new(0, 8, 1, -40)
-CreditLabel.BackgroundTransparency = 1
-CreditLabel.TextColor3 = Color3.fromRGB(100, 100, 130)
-CreditLabel.Text = "Script Created by ADIEL"
-CreditLabel.TextSize = 10
-CreditLabel.Font = Enum.Font.GothamBold
-CreditLabel.TextXAlignment = Enum.TextXAlignment.Left
-CreditLabel.TextYAlignment = Enum.TextYAlignment.Bottom
-CreditLabel.Parent = InfoFrame
-
--- ============================================================
--- CONSOLE POPUP
--- ============================================================
-ConsolePopup = Instance.new("Frame")
-ConsolePopup.Size = UDim2.new(0, 340, 0, 260)
-ConsolePopup.Position = UDim2.new(0.5, -170, 0.5, -130)
-ConsolePopup.BackgroundColor3 = Color3.fromRGB(10, 10, 15)
-ConsolePopup.BorderSizePixel = 0
-ConsolePopup.Visible = false
-ConsolePopup.ZIndex = 20
-ConsolePopup.Active = true
-ConsolePopup.Parent = ScreenGui
-
-local ConsolePopupCorner = Instance.new("UICorner")
-ConsolePopupCorner.CornerRadius = UDim.new(0, 10)
-ConsolePopupCorner.Parent = ConsolePopup
-
-local ConsoleTitle = Instance.new("Frame")
-ConsoleTitle.Size = UDim2.new(1, 0, 0, 30)
-ConsoleTitle.BackgroundColor3 = Color3.fromRGB(25, 25, 35)
-ConsoleTitle.BorderSizePixel = 0
-ConsoleTitle.ZIndex = 21
-ConsoleTitle.Active = true
-ConsoleTitle.Parent = ConsolePopup
-
-local ConsoleTitleCorner = Instance.new("UICorner")
-ConsoleTitleCorner.CornerRadius = UDim.new(0, 10)
-ConsoleTitleCorner.Parent = ConsoleTitle
-
-local ConsoleTitleLabel = Instance.new("TextLabel")
-ConsoleTitleLabel.Size = UDim2.new(1, -100, 1, 0)
-ConsoleTitleLabel.Position = UDim2.new(0, 10, 0, 0)
-ConsoleTitleLabel.BackgroundTransparency = 1
-ConsoleTitleLabel.TextColor3 = Color3.fromRGB(0, 220, 130)
-ConsoleTitleLabel.Text = "CONSOLE"
-ConsoleTitleLabel.TextSize = 12
-ConsoleTitleLabel.Font = Enum.Font.GothamBold
-ConsoleTitleLabel.TextXAlignment = Enum.TextXAlignment.Left
-ConsoleTitleLabel.ZIndex = 22
-ConsoleTitleLabel.Parent = ConsoleTitle
-
-local ClearBtn = Instance.new("TextButton")
-ClearBtn.Size = UDim2.new(0, 50, 0, 22)
-ClearBtn.Position = UDim2.new(1, -85, 0, 4)
-ClearBtn.BackgroundColor3 = Color3.fromRGB(70, 45, 45)
-ClearBtn.TextColor3 = Color3.fromRGB(255, 200, 200)
-ClearBtn.Text = "CLEAR"
-ClearBtn.TextSize = 10
-ClearBtn.Font = Enum.Font.GothamBold
-ClearBtn.ZIndex = 22
-ClearBtn.Parent = ConsoleTitle
-
-local ClearCorner = Instance.new("UICorner")
-ClearCorner.CornerRadius = UDim.new(0, 4)
-ClearCorner.Parent = ClearBtn
-
-local ConsoleClose = Instance.new("TextButton")
-ConsoleClose.Size = UDim2.new(0, 25, 0, 22)
-ConsoleClose.Position = UDim2.new(1, -28, 0, 4)
-ConsoleClose.BackgroundColor3 = Color3.fromRGB(180, 50, 50)
-ConsoleClose.TextColor3 = Color3.fromRGB(255, 255, 255)
-ConsoleClose.Text = "X"
-ConsoleClose.TextSize = 12
-ConsoleClose.Font = Enum.Font.GothamBold
-ConsoleClose.ZIndex = 22
-ConsoleClose.Parent = ConsoleTitle
-
-local ConsoleCloseCorner = Instance.new("UICorner")
-ConsoleCloseCorner.CornerRadius = UDim.new(0, 4)
-ConsoleCloseCorner.Parent = ConsoleClose
-
-LogScroll = Instance.new("ScrollingFrame")
-LogScroll.Size = UDim2.new(1, -10, 1, -40)
-LogScroll.Position = UDim2.new(0, 5, 0, 35)
-LogScroll.BackgroundTransparency = 1
-LogScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
-LogScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
-LogScroll.ScrollBarThickness = 4
-LogScroll.ZIndex = 21
-LogScroll.Parent = ConsolePopup
-
-local LogList = Instance.new("UIListLayout")
-LogList.Padding = UDim.new(0, 2)
-LogList.Parent = LogScroll
-
--- ============================================================
--- FLOATING BUBBLE
--- ============================================================
-local Bubble = Instance.new("TextButton")
-Bubble.Name = "FloatingBubble"
-Bubble.Size = UDim2.new(0, 50, 0, 50)
-Bubble.Position = UDim2.new(0, 20, 0, 100)
-Bubble.BackgroundColor3 = Color3.fromRGB(0, 160, 90)
-Bubble.TextColor3 = Color3.fromRGB(255, 255, 255)
-Bubble.Text = "H"
-Bubble.TextSize = 20
-Bubble.Font = Enum.Font.GothamBold
-Bubble.Visible = false
-Bubble.Active = true
-Bubble.Parent = ScreenGui
-
-local BubbleCorner = Instance.new("UICorner")
-BubbleCorner.CornerRadius = UDim.new(1, 0)
-BubbleCorner.Parent = Bubble
-
-local BubbleStroke = Instance.new("UIStroke")
-BubbleStroke.Color = Color3.fromRGB(0, 220, 130)
-BubbleStroke.Thickness = 2
-BubbleStroke.Parent = Bubble
-
--- ============================================================
--- DRAGGABLE
--- ============================================================
+--==============================================================================
+-- SECTION 17 : DRAGGABLE FUNCTION
+--==============================================================================
 local function makeDraggable(frame, dragHandle)
-    dragHandle = dragHandle or frame
+    if not frame or not dragHandle then return end
     
     local dragging = false
     local dragStart = nil
     local startPos = nil
     
-    dragHandle.InputBegan:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 
+    local function onInputBegan(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
             or input.UserInputType == Enum.UserInputType.Touch then
             dragging = true
             dragStart = input.Position
@@ -965,186 +977,229 @@ local function makeDraggable(frame, dragHandle)
                 end
             end)
         end
-    end)
+    end
     
-    UserInputService.InputChanged:Connect(function(input)
-        if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement 
-            or input.UserInputType == Enum.UserInputType.Touch) then
+    local function onInputChanged(input)
+        if dragging then
             local delta = input.Position - dragStart
             frame.Position = UDim2.new(
-                startPos.X.Scale, 
+                startPos.X.Scale,
                 startPos.X.Offset + delta.X,
-                startPos.Y.Scale, 
+                startPos.Y.Scale,
                 startPos.Y.Offset + delta.Y
             )
+        end
+    end
+    
+    dragHandle.InputBegan:Connect(onInputBegan)
+    UserInputService.InputChanged:Connect(onInputChanged)
+end
+
+--==============================================================================
+-- SECTION 18 : REAL-TIME STATS UPDATE
+--==============================================================================
+local function startStatsUpdater()
+    task.spawn(function()
+        while true do
+            task.wait(0.5)
+            
+            pcall(function()
+                if GUI_REFS.Labels.total then
+                    GUI_REFS.Labels.total.Text = "Total: " .. tostring(stats.collected)
+                end
+                if GUI_REFS.Labels.ginseng then
+                    GUI_REFS.Labels.ginseng.Text = "Ginseng: " .. tostring(stats.ginseng)
+                end
+                if GUI_REFS.Labels.spirit then
+                    GUI_REFS.Labels.spirit.Text = "Spirit Grass: " .. tostring(stats.spiritGrass)
+                end
+                if GUI_REFS.Labels.lastScan then
+                    GUI_REFS.Labels.lastScan.Text = "Last Scan: " .. tostring(stats.lastScanCount) .. " plants"
+                end
+                if GUI_REFS.Labels.duration then
+                    GUI_REFS.Labels.duration.Text = "Duration: " .. string.format("%.2f", stats.lastDuration) .. "s"
+                end
+                if GUI_REFS.Labels.status then
+                    if STATE.isHarvesting then
+                        GUI_REFS.Labels.status.Text = "Status: HARVESTING"
+                        GUI_REFS.Labels.status.TextColor3 = Color3.fromRGB(255, 200, 0)
+                    elseif STATE.autoLoopActive then
+                        GUI_REFS.Labels.status.Text = "Status: AUTO LOOP"
+                        GUI_REFS.Labels.status.TextColor3 = Color3.fromRGB(0, 200, 255)
+                    else
+                        GUI_REFS.Labels.status.Text = "Status: IDLE"
+                        GUI_REFS.Labels.status.TextColor3 = Color3.fromRGB(0, 220, 130)
+                    end
+                end
+            end)
         end
     end)
 end
 
-makeDraggable(MainFrame, TitleBar)
-makeDraggable(Bubble, Bubble)
-makeDraggable(ConsolePopup, ConsoleTitle)
-
--- ============================================================
--- REAL-TIME STATS UPDATE
--- ============================================================
-task.spawn(function()
-    while task.wait(0.5) do
-        TotalLabel.Text = "Total: " .. stats.collected
-        GinsengLabel.Text = "Ginseng: " .. stats.ginseng
-        SpiritLabel.Text = "Spirit Grass: " .. stats.spiritGrass
-        DetectedLabel.Text = "Last Scan: " .. stats.lastScanCount .. " plants"
-        
-        if stats.startTime > 0 then
-            local elapsed = math.floor(tick() - stats.startTime)
-            TimeLabel.Text = "Duration: " .. elapsed .. "s"
+--==============================================================================
+-- SECTION 19 : EVENT HANDLERS
+--==============================================================================
+local function bindEvents()
+    -- Harvest All
+    GUI_REFS.Buttons.harvestAll.MouseButton1Click:Connect(function()
+        task.spawn(function()
+            pcall(function()
+                doMassHarvest()
+            end)
+        end)
+    end)
+    
+    -- Auto Loop
+    GUI_REFS.Buttons.autoLoop.MouseButton1Click:Connect(function()
+        if STATE.autoLoopActive then
+            stopAutoLoop()
+            GUI_REFS.Buttons.autoLoop.Text = "AUTO LOOP: OFF"
+            GUI_REFS.Buttons.autoLoop.BackgroundColor3 = Color3.fromRGB(0, 110, 180)
+        else
+            startAutoLoop()
+            GUI_REFS.Buttons.autoLoop.Text = "AUTO LOOP: ON"
+            GUI_REFS.Buttons.autoLoop.BackgroundColor3 = Color3.fromRGB(0, 180, 90)
         end
-    end
-end)
-
--- ============================================================
--- EVENT HANDLERS
--- ============================================================
-HarvestBtn.MouseButton1Click:Connect(function()
-    if isHarvesting then
-        log("Harvest in progress...", Color3.fromRGB(255, 200, 100))
-        return
+    end)
+    
+    -- Scan
+    GUI_REFS.Buttons.scan.MouseButton1Click:Connect(function()
+        task.spawn(function()
+            pcall(function()
+                local plants = findAllPlants()
+                stats.lastScanCount = #plants
+                log("Scan selesai: " .. tostring(#plants) .. " plants ditemukan", "info")
+            end)
+        end)
+    end)
+    
+    -- Reset Stats
+    GUI_REFS.Buttons.reset.MouseButton1Click:Connect(function()
+        stats.collected = 0
+        stats.ginseng = 0
+        stats.spiritGrass = 0
+        stats.lastScanCount = 0
+        stats.lastDuration = 0
+        log("Stats di-reset", "warn")
+    end)
+    
+    -- Open Console
+    GUI_REFS.Buttons.console.MouseButton1Click:Connect(function()
+        if GUI_REFS.Console then
+            GUI_REFS.Console.Visible = not GUI_REFS.Console.Visible
+            STATE.consoleVisible = GUI_REFS.Console.Visible
+        end
+    end)
+    
+    -- Clear Console
+    if GUI_REFS.Buttons.clearBtn then
+        GUI_REFS.Buttons.clearBtn.MouseButton1Click:Connect(function()
+            pcall(function()
+                for _, child in ipairs(GUI_REFS.LogFrame:GetChildren()) do
+                    if child:IsA("TextLabel") then
+                        child:Destroy()
+                    end
+                end
+                STATE.logs = {}
+            end)
+        end)
     end
     
-    HarvestBtn.Text = "HARVESTING..."
-    HarvestBtn.BackgroundColor3 = Color3.fromRGB(50, 100, 30)
-    StatusLabel.Text = "Status: HARVESTING"
-    StatusLabel.TextColor3 = Color3.fromRGB(0, 220, 100)
+    -- Close Console
+    if GUI_REFS.Buttons.closeConsole then
+        GUI_REFS.Buttons.closeConsole.MouseButton1Click:Connect(function()
+            if GUI_REFS.Console then
+                GUI_REFS.Console.Visible = false
+                STATE.consoleVisible = false
+            end
+        end)
+    end
+    
+    -- Minimize Main GUI (show bubble)
+    GUI_REFS.Buttons.minBtn.MouseButton1Click:Connect(function()
+        GUI_REFS.MainFrame.Visible = false
+        if GUI_REFS.Bubble then
+            GUI_REFS.Bubble.Visible = true
+        end
+    end)
+    
+    -- Close Main GUI (show bubble)
+    GUI_REFS.Buttons.closeBtn.MouseButton1Click:Connect(function()
+        GUI_REFS.MainFrame.Visible = false
+        if GUI_REFS.Console then
+            GUI_REFS.Console.Visible = false
+        end
+        if GUI_REFS.Bubble then
+            GUI_REFS.Bubble.Visible = true
+        end
+    end)
+    
+    -- Bubble clicked -> Show GUI
+    if GUI_REFS.Bubble then
+        GUI_REFS.Bubble.MouseButton1Click:Connect(function()
+            GUI_REFS.MainFrame.Visible = true
+            GUI_REFS.Bubble.Visible = false
+        end)
+    end
+end
+
+--==============================================================================
+-- SECTION 20 : ANTI-AFK + INITIAL SCAN + LOADED PRINT
+--==============================================================================
+local function setupAntiAFK()
+    pcall(function()
+        LocalPlayer.Idled:Connect(function()
+            VirtualUser:Button2Down(Vector2.new(0, 0))
+            task.wait(1)
+            VirtualUser:Button2Up(Vector2.new(0, 0))
+            log("Anti-AFK triggered", "info")
+        end)
+    end)
+end
+
+local function reconnectCharacter()
+    pcall(function()
+        LocalPlayer.CharacterAdded:Connect(function()
+            task.wait(1)
+            updateCharacterRefs()
+            log("Character respawn - refs updated", "info")
+        end)
+    end)
+end
+
+--==============================================================================
+-- INITIALIZATION
+--==============================================================================
+local function init()
+    log("Loading TRUE MASS HARVEST v6.1...", "info")
+    
+    updateCharacterRefs()
+    reconnectCharacter()
+    
+    createGUI()
+    createConsolePopup()
+    
+    makeDraggable(GUI_REFS.MainFrame, GUI_REFS.MainFrame:FindFirstChild("TitleBar"))
+    makeDraggable(GUI_REFS.Bubble, GUI_REFS.Bubble)
+    if GUI_REFS.Console then
+        makeDraggable(GUI_REFS.Console, GUI_REFS.Console:FindFirstChild("ConsoleTitle"))
+    end
+    
+    bindEvents()
+    startStatsUpdater()
+    setupAntiAFK()
     
     task.spawn(function()
-        doMassHarvest()
-        
-        HarvestBtn.Text = "HARVEST ALL SEKARANG"
-        HarvestBtn.BackgroundColor3 = Color3.fromRGB(0, 160, 90)
-        
-        if autoLoop then
-            StatusLabel.Text = "Status: AUTO LOOP"
-        else
-            StatusLabel.Text = "Status: IDLE"
-            StatusLabel.TextColor3 = Color3.fromRGB(255, 100, 100)
-        end
+        task.wait(0.5)
+        pcall(function()
+            local plants = findAllPlants()
+            stats.lastScanCount = #plants
+            log("Initial scan: " .. tostring(#plants) .. " plants", "success")
+        end)
     end)
-end)
-
-AutoLoopBtn.MouseButton1Click:Connect(function()
-    if autoLoop then
-        stopAutoLoop()
-        AutoLoopBtn.Text = "AUTO LOOP: OFF"
-        AutoLoopBtn.BackgroundColor3 = Color3.fromRGB(0, 110, 180)
-        StatusLabel.Text = "Status: IDLE"
-        StatusLabel.TextColor3 = Color3.fromRGB(255, 100, 100)
-    else
-        startAutoLoop()
-        AutoLoopBtn.Text = "AUTO LOOP: ON"
-        AutoLoopBtn.BackgroundColor3 = Color3.fromRGB(180, 100, 0)
-        StatusLabel.Text = "Status: AUTO LOOP"
-        StatusLabel.TextColor3 = Color3.fromRGB(0, 220, 100)
-    end
-end)
-
-ScanBtn.MouseButton1Click:Connect(function()
-    ScanBtn.Text = "SCANNING..."
-    task.wait(0.1)
     
-    local plants = findAllPlants()
-    stats.lastScanCount = #plants
-    
-    if #plants > 0 then
-        -- Hitung per jenis
-        local ginsengCount = 0
-        local spiritCount = 0
-        for _, p in ipairs(plants) do
-            if string.find(string.lower(p.name), "ginseng") then
-                ginsengCount = ginsengCount + 1
-            elseif string.find(string.lower(p.name), "spirit") then
-                spiritCount = spiritCount + 1
-            end
-        end
-        
-        log("Found " .. #plants .. " plants (Ginseng: " .. ginsengCount .. ", Spirit Grass: " .. spiritCount .. ")", Color3.fromRGB(150, 255, 100))
-    else
-        log("No plants found", Color3.fromRGB(255, 200, 100))
-    end
-    
-    ScanBtn.Text = "SCAN PLANTS"
-end)
+    log("Script Created by ADIEL - Loaded successfully", "success")
+    log("NO TELEPORT MODE - Distance Harvest aktif", "success")
+end
 
-ResetBtn.MouseButton1Click:Connect(function()
-    stats.collected = 0
-    stats.ginseng = 0
-    stats.spiritGrass = 0
-    stats.lastScanCount = 0
-    stats.startTime = 0
-    
-    TotalLabel.Text = "Total: 0"
-    GinsengLabel.Text = "Ginseng: 0"
-    SpiritLabel.Text = "Spirit Grass: 0"
-    DetectedLabel.Text = "Last Scan: 0 plants"
-    TimeLabel.Text = "Duration: 0s"
-    
-    log("Stats reset", Color3.fromRGB(200, 200, 200))
-end)
-
-ConsoleBtn.MouseButton1Click:Connect(function()
-    ConsolePopup.Visible = not ConsolePopup.Visible
-end)
-
-ClearBtn.MouseButton1Click:Connect(function()
-    for _, child in ipairs(LogScroll:GetChildren()) do
-        if child:IsA("TextLabel") then
-            child:Destroy()
-        end
-    end
-    logCount = 0
-end)
-
-ConsoleClose.MouseButton1Click:Connect(function()
-    ConsolePopup.Visible = false
-end)
-
-MinBtn.MouseButton1Click:Connect(function()
-    if MainFrame.Size.Y.Offset > 50 then
-        MainFrame.Size = UDim2.new(0, 680, 0, 35)
-        MinBtn.Text = "o"
-    else
-        MainFrame.Size = UDim2.new(0, 680, 0, 260)
-        MinBtn.Text = "_"
-    end
-end)
-
-CloseBtn.MouseButton1Click:Connect(function()
-    MainFrame.Visible = false
-    Bubble.Position = MainFrame.Position
-    Bubble.Visible = true
-end)
-
-Bubble.MouseButton1Click:Connect(function()
-    MainFrame.Visible = true
-    Bubble.Visible = false
-end)
-
--- ============================================================
--- ANTI-AFK
--- ============================================================
-player.Idled:Connect(function()
-    pcall(function()
-        VirtualUser:Button2Down(Vector2.new(0, 0))
-        task.wait(1)
-        VirtualUser:Button2Up(Vector2.new(0, 0))
-    end)
-end)
-
--- ============================================================
--- DONE
--- ============================================================
-print("=========================================")
-print("  MASS HARVEST v6.0")
-print("  Script Created by ADIEL")
-print("=========================================")
-print("Plants: Ginseng, Spirit Grass")
-print("Methods: GetDescendants + CollectionService + Batch")
+init()
