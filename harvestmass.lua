@@ -1,6 +1,6 @@
 --[[
 =========================================================
-  UNIVERSAL AUTOFARM v5.2 - REWARD CLAIMER EDITION
+  UNIVERSAL AUTOFARM v5.2 - INTEGRATED AUTO CLAIM
   Author: Kyriel (for ADIEL)
   Executor: Delta / Codex / Wave / Xeno
 
@@ -10,8 +10,9 @@ FITUR:
   - Auto-next-target (seamless kill)
   - Anti-death (auto respawn)
   - Stealth Plant Collector (Ginseng & Spirit Grass)
-  - AUTO CLAIM PLAYTIME REWARDS (GUI/Proximity/Remote)
-  - GUI HORIZONTAL (kesamping) + Dark + No Emoji
+  - AUTO CLAIM REWARDS (getconnections)
+  - ANTI-AFK (CaptureController)
+  - GUI HORIZONTAL
   - Script Created by ADIEL
 =========================================================
 ]]
@@ -22,7 +23,6 @@ FITUR:
 local Players = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
 local VirtualUser = game:GetService("VirtualUser")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local player = Players.LocalPlayer
 local character = player.Character or player.CharacterAdded:Wait()
@@ -33,7 +33,6 @@ local humanoid = character:WaitForChild("Humanoid")
 -- CONFIG
 -- ============================================================
 local CONFIG = {
-    -- AUTOFARM
     ATTACK_RANGE = 150,
     TELEPORT_HEIGHT = 10,
     LOCK_UPDATE_RATE = 0.05,
@@ -45,7 +44,6 @@ local CONFIG = {
     SKILL_COOLDOWN = 0.8,
     AUTO_RESPAWN = true,
     
-    -- PLANT COLLECTOR
     PLANT_NAMES = {
         "Ginseng",
         "Spirit Grass",
@@ -57,16 +55,6 @@ local CONFIG = {
     PLANT_TELEPORT_DELAY = 0.3,
     PLANT_AFTER_FIRE_DELAY = 0.5,
     
-    -- REWARD CLAIMER
-    AUTO_CLAIM_REWARDS = true,
-    REWARD_CHECK_INTERVAL = 30,
-    REWARD_KEYWORDS = {
-        "playtime", "reward", "claim", "daily",
-        "login", "time", "gift", "bonus", "checkin",
-        "masa", "main", "waktu", "hadiah", "ambil",
-    },
-    
-    -- NPC
     NPC_WHITELIST = {
         "Scorpion",
         "Tombguardian",
@@ -78,6 +66,10 @@ local CONFIG = {
     LOG_LIMIT = 30,
     SCAN_INTERVAL = 10,
     DEBUG = false,
+    
+    -- AUTO CLAIM
+    AUTO_CLAIM_INTERVAL = 10,
+    CLAIM_KEYWORDS = {"claim", "klaim", "ambil"},
 }
 
 -- ============================================================
@@ -85,7 +77,6 @@ local CONFIG = {
 -- ============================================================
 local isRunning = false
 local isCollectingPlants = false
-local rewardLoopActive = false
 local currentTarget = nil
 local lastSkillTime = 0
 local cachedTool = nil
@@ -229,7 +220,7 @@ local function getAllNPCs()
 end
 
 -- ============================================================
--- LOCK KE ATAS KEPALA NPC
+-- LOCK TO NPC
 -- ============================================================
 local function lockToNPC(npc)
     if not npc or not npc.model or not npc.model.Parent then return end
@@ -579,176 +570,7 @@ local function stopPlantCollector()
 end
 
 -- ============================================================
--- AUTO CLAIM PLAYTIME REWARDS
--- ============================================================
-local function tryClaimGuiReward()
-    local claimed = 0
-    local playerGui = player:FindFirstChild("PlayerGui")
-    if not playerGui then return 0 end
-    
-    for _, gui in ipairs(playerGui:GetDescendants()) do
-        if gui:IsA("TextButton") or gui:IsA("ImageButton") then
-            local isVisible = false
-            pcall(function()
-                if gui.Visible and gui.AbsoluteSize.X > 0 and gui.AbsoluteSize.Y > 0 then
-                    isVisible = true
-                end
-            end)
-            
-            if isVisible then
-                local btnText = ""
-                pcall(function()
-                    if gui:IsA("TextButton") then
-                        btnText = string.lower(tostring(gui.Text or ""))
-                    end
-                end)
-                
-                local btnName = string.lower(gui.Name or "")
-                local combined = btnName .. " " .. btnText
-                
-                local isRewardBtn = false
-                for _, kw in ipairs(CONFIG.REWARD_KEYWORDS) do
-                    if string.find(combined, kw) then
-                        isRewardBtn = true
-                        break
-                    end
-                end
-                
-                if isRewardBtn then
-                    local canClaim = true
-                    if string.find(btnText, "claimed")
-                        or string.find(btnText, "sudah")
-                        or string.find(btnText, "taken") then
-                        canClaim = false
-                    end
-                    
-                    if canClaim then
-                        pcall(function()
-                            gui:Activate()
-                            claimed = claimed + 1
-                        end)
-                    end
-                end
-            end
-        end
-    end
-    
-    return claimed
-end
-
-local function tryClaimProximity()
-    local claimed = 0
-    
-    for _, obj in ipairs(workspace:GetDescendants()) do
-        if obj:IsA("ProximityPrompt") then
-            local promptName = string.lower(obj.Name or "")
-            local parentName = ""
-            if obj.Parent then
-                parentName = string.lower(obj.Parent.Name or "")
-            end
-            local combined = promptName .. " " .. parentName
-            
-            local isReward = false
-            for _, kw in ipairs(CONFIG.REWARD_KEYWORDS) do
-                if string.find(combined, kw) then
-                    isReward = true
-                    break
-                end
-            end
-            
-            if isReward and obj.Enabled then
-                pcall(function()
-                    obj.MaxActivationDistance = 999999
-                    obj.HoldDuration = 0
-                    obj.RequiresLineOfSight = false
-                    fireproximityprompt(obj)
-                    claimed = claimed + 1
-                end)
-            end
-        end
-    end
-    
-    return claimed
-end
-
-local function tryClaimRemote()
-    local claimed = 0
-    local services = {
-        ReplicatedStorage,
-        game:GetService("ReplicatedFirst"),
-    }
-    
-    for _, service in ipairs(services) do
-        pcall(function()
-            for _, obj in ipairs(service:GetDescendants()) do
-                if obj:IsA("RemoteEvent") or obj:IsA("RemoteFunction") then
-                    local nameLower = string.lower(obj.Name or "")
-                    
-                    local isReward = false
-                    for _, kw in ipairs(CONFIG.REWARD_KEYWORDS) do
-                        if string.find(nameLower, kw) then
-                            isReward = true
-                            break
-                        end
-                    end
-                    
-                    if isReward then
-                        pcall(function()
-                            if obj:IsA("RemoteEvent") then
-                                obj:FireServer()
-                            else
-                                obj:InvokeServer()
-                            end
-                            claimed = claimed + 1
-                        end)
-                    end
-                end
-            end
-        end)
-    end
-    
-    return claimed
-end
-
-local function autoClaimRewards()
-    if not CONFIG.AUTO_CLAIM_REWARDS then return 0 end
-    
-    local totalClaimed = 0
-    local guiClaimed = tryClaimGuiReward()
-    local promptClaimed = tryClaimProximity()
-    local remoteClaimed = tryClaimRemote()
-    
-    totalClaimed = guiClaimed + promptClaimed + remoteClaimed
-    
-    if totalClaimed > 0 then
-        stats.claimedRewards = stats.claimedRewards + totalClaimed
-        log("Claimed " .. totalClaimed .. " reward(s)", Color3.fromRGB(255, 220, 100))
-    end
-    
-    return totalClaimed
-end
-
-local function startRewardAutoClaim()
-    if rewardLoopActive then return end
-    rewardLoopActive = true
-    
-    log("Auto Claim Rewards STARTED", Color3.fromRGB(255, 220, 100))
-    
-    task.spawn(function()
-        while rewardLoopActive do
-            pcall(autoClaimRewards)
-            task.wait(CONFIG.REWARD_CHECK_INTERVAL)
-        end
-    end)
-end
-
-local function stopRewardAutoClaim()
-    rewardLoopActive = false
-    log("Auto Claim Rewards STOPPED", Color3.fromRGB(255, 150, 100))
-end
-
--- ============================================================
--- GUI - HORIZONTAL LAYOUT
+-- GUI
 -- ============================================================
 local ScreenGui = Instance.new("ScreenGui")
 ScreenGui.Name = "AutofarmGUI"
@@ -756,7 +578,6 @@ ScreenGui.ResetOnSpawn = false
 ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 ScreenGui.Parent = player:WaitForChild("PlayerGui")
 
--- MAIN FRAME
 local MainFrame = Instance.new("Frame")
 MainFrame.Size = UDim2.new(0, 720, 0, 280)
 MainFrame.Position = UDim2.new(0.5, -360, 0.5, -140)
@@ -826,7 +647,7 @@ local CloseCorner = Instance.new("UICorner")
 CloseCorner.CornerRadius = UDim.new(0, 5)
 CloseCorner.Parent = CloseBtn
 
--- ═══ COLUMN 1: STATS ═══
+-- COLUMN 1: STATS
 local StatsFrame = Instance.new("Frame")
 StatsFrame.Size = UDim2.new(0, 220, 1, -50)
 StatsFrame.Position = UDim2.new(0, 12, 0, 42)
@@ -904,7 +725,6 @@ RewardCountLabel.Font = Enum.Font.Gotham
 RewardCountLabel.TextXAlignment = Enum.TextXAlignment.Left
 RewardCountLabel.Parent = StatsFrame
 
--- HP Bar
 local HPText = Instance.new("TextLabel")
 HPText.Size = UDim2.new(1, -16, 0, 16)
 HPText.Position = UDim2.new(0, 8, 0, 148)
@@ -950,7 +770,7 @@ StatusLabel.TextYAlignment = Enum.TextYAlignment.Top
 StatusLabel.TextWrapped = true
 StatusLabel.Parent = StatsFrame
 
--- ═══ COLUMN 2: AUTOFARM ═══
+-- COLUMN 2: AUTOFARM
 local FarmFrame = Instance.new("Frame")
 FarmFrame.Size = UDim2.new(0, 220, 1, -50)
 FarmFrame.Position = UDim2.new(0, 244, 0, 42)
@@ -1043,9 +863,9 @@ local ConsoleCorner = Instance.new("UICorner")
 ConsoleCorner.CornerRadius = UDim.new(0, 6)
 ConsoleCorner.Parent = ConsoleBtn
 
--- ═══ COLUMN 3: PLANT + REWARD ═══
+-- COLUMN 3: PLANT
 local PlantFrame = Instance.new("Frame")
-PlantFrame.Size = UDim2.new(0, 220, 0, 118)
+PlantFrame.Size = UDim2.new(0, 220, 1, -50)
 PlantFrame.Position = UDim2.new(0, 476, 0, 42)
 PlantFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 28)
 PlantFrame.BorderSizePixel = 0
@@ -1056,23 +876,23 @@ PlantCorner.CornerRadius = UDim.new(0, 8)
 PlantCorner.Parent = PlantFrame
 
 local PlantTitle = Instance.new("TextLabel")
-PlantTitle.Size = UDim2.new(1, -16, 0, 18)
-PlantTitle.Position = UDim2.new(0, 8, 0, 6)
+PlantTitle.Size = UDim2.new(1, -16, 0, 20)
+PlantTitle.Position = UDim2.new(0, 8, 0, 8)
 PlantTitle.BackgroundTransparency = 1
 PlantTitle.TextColor3 = Color3.fromRGB(150, 220, 100)
 PlantTitle.Text = "PLANT COLLECTOR"
-PlantTitle.TextSize = 10
+PlantTitle.TextSize = 11
 PlantTitle.Font = Enum.Font.GothamBold
 PlantTitle.TextXAlignment = Enum.TextXAlignment.Left
 PlantTitle.Parent = PlantFrame
 
 local PlantToggleBtn = Instance.new("TextButton")
-PlantToggleBtn.Size = UDim2.new(1, -16, 0, 35)
-PlantToggleBtn.Position = UDim2.new(0, 8, 0, 28)
+PlantToggleBtn.Size = UDim2.new(1, -16, 0, 40)
+PlantToggleBtn.Position = UDim2.new(0, 8, 0, 32)
 PlantToggleBtn.BackgroundColor3 = Color3.fromRGB(0, 130, 70)
 PlantToggleBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
 PlantToggleBtn.Text = "START PLANT COLLECTOR"
-PlantToggleBtn.TextSize = 11
+PlantToggleBtn.TextSize = 12
 PlantToggleBtn.Font = Enum.Font.GothamBold
 PlantToggleBtn.Parent = PlantFrame
 
@@ -1081,12 +901,12 @@ PlantToggleCorner.CornerRadius = UDim.new(0, 6)
 PlantToggleCorner.Parent = PlantToggleBtn
 
 local InstantCollectBtn = Instance.new("TextButton")
-InstantCollectBtn.Size = UDim2.new(1, -16, 0, 30)
-InstantCollectBtn.Position = UDim2.new(0, 8, 0, 70)
+InstantCollectBtn.Size = UDim2.new(1, -16, 0, 32)
+InstantCollectBtn.Position = UDim2.new(0, 8, 0, 80)
 InstantCollectBtn.BackgroundColor3 = Color3.fromRGB(70, 160, 50)
 InstantCollectBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
 InstantCollectBtn.Text = "COLLECT SEKARANG"
-InstantCollectBtn.TextSize = 11
+InstantCollectBtn.TextSize = 12
 InstantCollectBtn.Font = Enum.Font.GothamBold
 InstantCollectBtn.Parent = PlantFrame
 
@@ -1094,60 +914,33 @@ local InstCorner = Instance.new("UICorner")
 InstCorner.CornerRadius = UDim.new(0, 6)
 InstCorner.Parent = InstantCollectBtn
 
--- REWARD FRAME
-local RewardFrame = Instance.new("Frame")
-RewardFrame.Size = UDim2.new(0, 220, 0, 100)
-RewardFrame.Position = UDim2.new(0, 476, 0, 170)
-RewardFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 28)
-RewardFrame.BorderSizePixel = 0
-RewardFrame.Parent = MainFrame
+local PlantInfo = Instance.new("TextLabel")
+PlantInfo.Size = UDim2.new(1, -16, 0, 80)
+PlantInfo.Position = UDim2.new(0, 8, 0, 120)
+PlantInfo.BackgroundTransparency = 1
+PlantInfo.TextColor3 = Color3.fromRGB(140, 140, 180)
+PlantInfo.Text = "Plants:\nGinseng\nSpirit Grass"
+PlantInfo.TextSize = 11
+PlantInfo.Font = Enum.Font.Gotham
+PlantInfo.TextXAlignment = Enum.TextXAlignment.Left
+PlantInfo.TextYAlignment = Enum.TextYAlignment.Top
+PlantInfo.TextWrapped = true
+PlantInfo.Parent = PlantFrame
 
-local RewardCorner = Instance.new("UICorner")
-RewardCorner.CornerRadius = UDim.new(0, 8)
-RewardCorner.Parent = RewardFrame
+local NPCInfo = Instance.new("TextLabel")
+NPCInfo.Size = UDim2.new(1, -16, 0, 60)
+NPCInfo.Position = UDim2.new(0, 8, 0, 200)
+NPCInfo.BackgroundTransparency = 1
+NPCInfo.TextColor3 = Color3.fromRGB(140, 140, 180)
+NPCInfo.Text = "NPC:\nScorpion, Tombguardian,\nWater Serpent"
+NPCInfo.TextSize = 10
+NPCInfo.Font = Enum.Font.Gotham
+NPCInfo.TextXAlignment = Enum.TextXAlignment.Left
+NPCInfo.TextYAlignment = Enum.TextYAlignment.Top
+NPCInfo.TextWrapped = true
+NPCInfo.Parent = PlantFrame
 
-local RewardTitle = Instance.new("TextLabel")
-RewardTitle.Size = UDim2.new(1, -16, 0, 18)
-RewardTitle.Position = UDim2.new(0, 8, 0, 6)
-RewardTitle.BackgroundTransparency = 1
-RewardTitle.TextColor3 = Color3.fromRGB(255, 220, 100)
-RewardTitle.Text = "PLAYTIME REWARDS"
-RewardTitle.TextSize = 10
-RewardTitle.Font = Enum.Font.GothamBold
-RewardTitle.TextXAlignment = Enum.TextXAlignment.Left
-RewardTitle.Parent = RewardFrame
-
-local RewardToggleBtn = Instance.new("TextButton")
-RewardToggleBtn.Size = UDim2.new(1, -16, 0, 35)
-RewardToggleBtn.Position = UDim2.new(0, 8, 0, 28)
-RewardToggleBtn.BackgroundColor3 = Color3.fromRGB(160, 140, 0)
-RewardToggleBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-RewardToggleBtn.Text = "START AUTO CLAIM"
-RewardToggleBtn.TextSize = 11
-RewardToggleBtn.Font = Enum.Font.GothamBold
-RewardToggleBtn.Parent = RewardFrame
-
-local RewardToggleCorner = Instance.new("UICorner")
-RewardToggleCorner.CornerRadius = UDim.new(0, 6)
-RewardToggleCorner.Parent = RewardToggleBtn
-
-local ClaimNowBtn = Instance.new("TextButton")
-ClaimNowBtn.Size = UDim2.new(1, -16, 0, 28)
-ClaimNowBtn.Position = UDim2.new(0, 8, 0, 68)
-ClaimNowBtn.BackgroundColor3 = Color3.fromRGB(180, 130, 50)
-ClaimNowBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-ClaimNowBtn.Text = "CLAIM SEKARANG"
-ClaimNowBtn.TextSize = 11
-ClaimNowBtn.Font = Enum.Font.GothamBold
-ClaimNowBtn.Parent = RewardFrame
-
-local ClaimNowCorner = Instance.new("UICorner")
-ClaimNowCorner.CornerRadius = UDim.new(0, 6)
-ClaimNowCorner.Parent = ClaimNowBtn
-
--- ============================================================
 -- CONSOLE POPUP
--- ============================================================
 ConsolePopup = Instance.new("Frame")
 ConsolePopup.Size = UDim2.new(0, 340, 0, 260)
 ConsolePopup.Position = UDim2.new(0.5, -170, 0.5, -130)
@@ -1230,9 +1023,7 @@ local LogList = Instance.new("UIListLayout")
 LogList.Padding = UDim.new(0, 2)
 LogList.Parent = LogScroll
 
--- ============================================================
 -- NPC LIST POPUP
--- ============================================================
 local ListPopup = Instance.new("Frame")
 ListPopup.Size = UDim2.new(0, 280, 0, 280)
 ListPopup.Position = UDim2.new(0.5, -140, 0.5, -140)
@@ -1346,9 +1137,7 @@ local function refreshNPCList()
     end
 end
 
--- ============================================================
 -- FLOATING BUBBLE
--- ============================================================
 local Bubble = Instance.new("TextButton")
 Bubble.Name = "FloatingBubble"
 Bubble.Size = UDim2.new(0, 50, 0, 50)
@@ -1371,9 +1160,7 @@ BubbleStroke.Color = Color3.fromRGB(0, 220, 130)
 BubbleStroke.Thickness = 2
 BubbleStroke.Parent = Bubble
 
--- ============================================================
 -- DRAGGABLE
--- ============================================================
 local function makeDraggable(frame, dragHandle)
     dragHandle = dragHandle or frame
     
@@ -1415,9 +1202,7 @@ makeDraggable(Bubble, Bubble)
 makeDraggable(ConsolePopup, ConsoleTitle)
 makeDraggable(ListPopup, ListTitle)
 
--- ============================================================
 -- REAL-TIME STATS UPDATE
--- ============================================================
 task.spawn(function()
     while task.wait(0.5) do
         if humanoid and humanoid.Parent then
@@ -1456,9 +1241,7 @@ task.spawn(function()
     end
 end)
 
--- ============================================================
 -- EVENT HANDLERS
--- ============================================================
 ToggleButton.MouseButton1Click:Connect(function()
     if isRunning then
         stopAutoFarm()
@@ -1501,30 +1284,6 @@ InstantCollectBtn.MouseButton1Click:Connect(function()
     task.wait(1)
     InstantCollectBtn.Text = "COLLECT SEKARANG"
     InstantCollectBtn.BackgroundColor3 = Color3.fromRGB(70, 160, 50)
-end)
-
-RewardToggleBtn.MouseButton1Click:Connect(function()
-    if rewardLoopActive then
-        stopRewardAutoClaim()
-        RewardToggleBtn.Text = "START AUTO CLAIM"
-        RewardToggleBtn.BackgroundColor3 = Color3.fromRGB(160, 140, 0)
-    else
-        startRewardAutoClaim()
-        RewardToggleBtn.Text = "STOP AUTO CLAIM"
-        RewardToggleBtn.BackgroundColor3 = Color3.fromRGB(160, 60, 0)
-    end
-end)
-
-ClaimNowBtn.MouseButton1Click:Connect(function()
-    ClaimNowBtn.Text = "CLAIMING..."
-    ClaimNowBtn.BackgroundColor3 = Color3.fromRGB(100, 70, 20)
-    
-    local count = autoClaimRewards()
-    
-    ClaimNowBtn.Text = "+" .. count .. " claimed"
-    task.wait(1)
-    ClaimNowBtn.Text = "CLAIM SEKARANG"
-    ClaimNowBtn.BackgroundColor3 = Color3.fromRGB(180, 130, 50)
 end)
 
 TeleportBtn.MouseButton1Click:Connect(function()
@@ -1597,25 +1356,55 @@ Bubble.MouseButton1Click:Connect(function()
 end)
 
 -- ============================================================
--- ANTI-AFK
+-- ANTI-AFK (VERSI LO)
 -- ============================================================
 player.Idled:Connect(function()
     pcall(function()
-        VirtualUser:Button2Down(Vector2.new(0, 0))
-        task.wait(1)
-        VirtualUser:Button2Up(Vector2.new(0, 0))
+        VirtualUser:CaptureController()
+        VirtualUser:ClickButton2(Vector2.new())
     end)
 end)
 
 -- ============================================================
--- AUTO START REWARD CLAIM
+-- AUTO CLAIM (BACKGROUND LOOP)
 -- ============================================================
-if CONFIG.AUTO_CLAIM_REWARDS then
-    task.wait(2)
-    pcall(startRewardAutoClaim)
-    RewardToggleBtn.Text = "STOP AUTO CLAIM"
-    RewardToggleBtn.BackgroundColor3 = Color3.fromRGB(160, 60, 0)
-end
+task.spawn(function()
+    while task.wait(CONFIG.AUTO_CLAIM_INTERVAL) do
+        pcall(function()
+            for _, obj in ipairs(player.PlayerGui:GetDescendants()) do
+                if (obj:IsA("TextButton") or obj:IsA("ImageButton")) and obj.Visible then
+                    local txt = ""
+                    if obj:IsA("TextButton") then
+                        txt = string.lower(obj.Text or "")
+                    else
+                        txt = string.lower(obj.Name or "")
+                    end
+                    
+                    local isClaim = false
+                    for _, kw in ipairs(CONFIG.CLAIM_KEYWORDS) do
+                        if string.find(txt, kw) then
+                            isClaim = true
+                            break
+                        end
+                    end
+                    
+                    if isClaim then
+                        pcall(function()
+                            for _, c in ipairs(getconnections(obj.MouseButton1Click)) do
+                                c:Fire()
+                            end
+                            for _, c in ipairs(getconnections(obj.Activated)) do
+                                c:Fire()
+                            end
+                        end)
+                        
+                        stats.claimedRewards = stats.claimedRewards + 1
+                    end
+                end
+            end
+        end)
+    end
+end)
 
 -- ============================================================
 -- INITIAL SCAN
@@ -1627,9 +1416,10 @@ CountLabel.Text = "NPC Detected: " .. #npcs
 -- DONE
 -- ============================================================
 print("=========================================")
-print("  AUTOFARM v5.2 - REWARD CLAIMER EDITION")
+print("  AUTOFARM v5.2 - INTEGRATED AUTO CLAIM")
 print("  Script Created by ADIEL")
 print("=========================================")
 print("Target NPC: Scorpion, Tombguardian, Water Serpent")
 print("Plant: Ginseng, Spirit Grass")
-print("Auto Claim Rewards: ON")
+print("Auto Claim: ACTIVE")
+print("Anti-AFK: CaptureController")
