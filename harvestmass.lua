@@ -1,18 +1,18 @@
 --[[
 =========================================================
-  UNIVERSAL AUTOFARM v5.2 - INTEGRATED AUTO CLAIM
+  UNIVERSAL AUTOFARM v5.3 - PLAYTIME CLAIM INTEGRATED
   Author: Kyriel (for ADIEL)
   Executor: Delta / Codex / Wave / Xeno
 
 FITUR:
   - Autofarm LOCK (Scorpion, Tombguardian, Water Serpent)
-  - ULTRA FAST: Kill rate 4x lebih cepet
+  - ULTRA FAST Kill rate
   - Auto-next-target (seamless kill)
   - Anti-death (auto respawn)
   - Stealth Plant Collector (Ginseng & Spirit Grass)
-  - AUTO CLAIM REWARDS (getconnections)
+  - AUTO CLAIM PLAYTIME REWARDS (path spesifik)
   - ANTI-AFK (CaptureController)
-  - GUI HORIZONTAL
+  - GUI HORIZONTAL + Dark + No Emoji
   - Script Created by ADIEL
 =========================================================
 ]]
@@ -67,9 +67,8 @@ local CONFIG = {
     SCAN_INTERVAL = 10,
     DEBUG = false,
     
-    -- AUTO CLAIM
-    AUTO_CLAIM_INTERVAL = 10,
-    CLAIM_KEYWORDS = {"claim", "klaim", "ambil"},
+    -- REWARD CLAIM
+    CLAIM_INTERVAL = 15,
 }
 
 -- ============================================================
@@ -220,7 +219,7 @@ local function getAllNPCs()
 end
 
 -- ============================================================
--- LOCK TO NPC
+-- LOCK KE ATAS KEPALA NPC
 -- ============================================================
 local function lockToNPC(npc)
     if not npc or not npc.model or not npc.model.Parent then return end
@@ -579,8 +578,8 @@ ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 ScreenGui.Parent = player:WaitForChild("PlayerGui")
 
 local MainFrame = Instance.new("Frame")
-MainFrame.Size = UDim2.new(0, 720, 0, 280)
-MainFrame.Position = UDim2.new(0.5, -360, 0.5, -140)
+MainFrame.Size = UDim2.new(0, 720, 0, 300)
+MainFrame.Position = UDim2.new(0.5, -360, 0.5, -150)
 MainFrame.BackgroundColor3 = Color3.fromRGB(15, 15, 20)
 MainFrame.BorderSizePixel = 0
 MainFrame.Active = true
@@ -613,7 +612,7 @@ Title.Size = UDim2.new(1, -80, 1, 0)
 Title.Position = UDim2.new(0, 12, 0, 0)
 Title.BackgroundTransparency = 1
 Title.TextColor3 = Color3.fromRGB(0, 220, 130)
-Title.Text = "AUTOFARM v5.2 - Script Created by ADIEL"
+Title.Text = "AUTOFARM v5.3 - Script Created by ADIEL"
 Title.TextSize = 13
 Title.Font = Enum.Font.GothamBold
 Title.TextXAlignment = Enum.TextXAlignment.Left
@@ -759,7 +758,7 @@ HPBarFill_Corner.Parent = HPBarFill
 
 local StatusLabel = Instance.new("TextLabel")
 StatusLabel.Size = UDim2.new(1, -16, 0, 40)
-StatusLabel.Position = UDim2.new(0, 8, 0, 188)
+StatusLabel.Position = UDim2.new(0, 8, 0, 195)
 StatusLabel.BackgroundTransparency = 1
 StatusLabel.TextColor3 = Color3.fromRGB(255, 100, 100)
 StatusLabel.Text = "Farm: IDLE\nPlant: IDLE"
@@ -1339,7 +1338,7 @@ MinBtn.MouseButton1Click:Connect(function()
         MainFrame.Size = UDim2.new(0, 720, 0, 35)
         MinBtn.Text = "o"
     else
-        MainFrame.Size = UDim2.new(0, 720, 0, 280)
+        MainFrame.Size = UDim2.new(0, 720, 0, 300)
         MinBtn.Text = "_"
     end
 end)
@@ -1366,39 +1365,39 @@ player.Idled:Connect(function()
 end)
 
 -- ============================================================
--- AUTO CLAIM (BACKGROUND LOOP)
+-- AUTO CLAIM PLAYTIME REWARDS (PATH SPESIFIK)
 -- ============================================================
-task.spawn(function()
-    while task.wait(CONFIG.AUTO_CLAIM_INTERVAL) do
+local function pressButton(btn)
+    for _, sig in ipairs({"MouseButton1Click", "Activated", "MouseButton1Down", "MouseButton1Up"}) do
         pcall(function()
-            for _, obj in ipairs(player.PlayerGui:GetDescendants()) do
-                if (obj:IsA("TextButton") or obj:IsA("ImageButton")) and obj.Visible then
-                    local txt = ""
-                    if obj:IsA("TextButton") then
-                        txt = string.lower(obj.Text or "")
-                    else
-                        txt = string.lower(obj.Name or "")
-                    end
-                    
-                    local isClaim = false
-                    for _, kw in ipairs(CONFIG.CLAIM_KEYWORDS) do
-                        if string.find(txt, kw) then
-                            isClaim = true
-                            break
+            for _, c in ipairs(getconnections(btn[sig])) do
+                c:Fire()
+            end
+        end)
+    end
+end
+
+task.spawn(function()
+    while task.wait(CONFIG.CLAIM_INTERVAL) do
+        pcall(function()
+            local container = player.PlayerGui.Main.Frames.Events.Container
+            if not container then return end
+            
+            for _, folder in ipairs(container:GetChildren()) do
+                if folder.Name:find("PlaytimeRewards") then
+                    local claim = folder:FindFirstChild("Claim")
+                    if claim then
+                        if claim:IsA("GuiButton") then
+                            pressButton(claim)
+                            stats.claimedRewards = stats.claimedRewards + 1
+                        else
+                            for _, b in ipairs(claim:GetDescendants()) do
+                                if b:IsA("GuiButton") then
+                                    pressButton(b)
+                                    stats.claimedRewards = stats.claimedRewards + 1
+                                end
+                            end
                         end
-                    end
-                    
-                    if isClaim then
-                        pcall(function()
-                            for _, c in ipairs(getconnections(obj.MouseButton1Click)) do
-                                c:Fire()
-                            end
-                            for _, c in ipairs(getconnections(obj.Activated)) do
-                                c:Fire()
-                            end
-                        end)
-                        
-                        stats.claimedRewards = stats.claimedRewards + 1
                     end
                 end
             end
@@ -1406,20 +1405,16 @@ task.spawn(function()
     end
 end)
 
--- ============================================================
 -- INITIAL SCAN
--- ============================================================
 local npcs = getAllNPCs()
 CountLabel.Text = "NPC Detected: " .. #npcs
 
--- ============================================================
 -- DONE
--- ============================================================
 print("=========================================")
-print("  AUTOFARM v5.2 - INTEGRATED AUTO CLAIM")
+print("  AUTOFARM v5.3 - PLAYTIME CLAIM INTEGRATED")
 print("  Script Created by ADIEL")
 print("=========================================")
 print("Target NPC: Scorpion, Tombguardian, Water Serpent")
 print("Plant: Ginseng, Spirit Grass")
-print("Auto Claim: ACTIVE")
+print("Reward Claim: PlaytimeRewards path")
 print("Anti-AFK: CaptureController")
