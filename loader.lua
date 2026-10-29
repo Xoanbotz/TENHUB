@@ -6,13 +6,9 @@
 =========================================================
 ]]
 
--- ============================================================
--- CONFIG
--- ============================================================
 local BASE_URL = "https://raw.githubusercontent.com/Xoanbotz/TENHUB/main/"
 
--- PlaceId -> nama file (tanpa .lua), isi di modules/games/
--- Satu file bisa handle banyak PlaceId (misal Blox Fruits main + 2 lainnya)
+-- PlaceId -> nama file (tanpa .lua) di modules/games/
 local GAMES = {
     -- [2753915549] = "blox_fruits",
     -- [4442272183] = "blox_fruits",
@@ -20,7 +16,7 @@ local GAMES = {
     -- [8737899170] = "pet_sim_99",
 }
 
-local FALLBACK_MODULE = "universal"  -- dipakai kalau PlaceId nggak ada di GAMES
+local FALLBACK_MODULE = "universal"
 
 -- ============================================================
 -- HELPERS
@@ -34,7 +30,6 @@ local function fetch(url)
     return nil
 end
 
--- Return 2 values: ok?, result
 local function runLua(code, ...)
     if type(code) ~= "string" then return false, "code not string" end
     local chunk, loadErr = loadstring(code)
@@ -49,12 +44,11 @@ local function runLua(code, ...)
 end
 
 -- ============================================================
--- LOAD SHARED LIBRARY
+-- LOAD SHARED
 -- ============================================================
 _G.TenHub = _G.TenHub or {}
 
-local sharedFiles = {"logger", "gui_util", "anti_afk"}
-for _, name in ipairs(sharedFiles) do
+for _, name in ipairs({"logger", "gui_util", "anti_afk"}) do
     local code = fetch(BASE_URL .. "modules/shared/" .. name .. ".lua")
     if code then
         local ok, err = runLua(code)
@@ -76,7 +70,7 @@ end
 Logger.info("TEN HUB starting...")
 
 -- ============================================================
--- CREATE MAIN WINDOW
+-- WINDOW
 -- ============================================================
 local okWin, WindowOrErr = pcall(GuiUtil.CreateWindow, {
     Title    = "TEN HUB",
@@ -89,6 +83,7 @@ if not okWin or not WindowOrErr then
     Logger.error("CreateWindow failed: " .. tostring(WindowOrErr))
     return
 end
+
 local Window = WindowOrErr
 local P = GuiUtil.Palette
 
@@ -113,7 +108,6 @@ end)
 Window:AddLabel("Game: " .. gameName, P.TEXT)
 Window:AddLabel("PlaceId: " .. tostring(game.PlaceId), P.GRAY)
 
--- FIX: default benar kalau enabled == false
 local aaInitial = (AntiAFK and AntiAFK.enabled == true)
 Window:AddLabel(
     "Anti-AFK: " .. (aaInitial and "ENABLED" or "DISABLED"),
@@ -126,63 +120,63 @@ end)
 -- ============================================================
 -- LOAD GAME MODULE
 -- ============================================================
-local placeId    = game.PlaceId
-local moduleName = GAMES[placeId]
-local isFallback = false
+local function loadGameModule()
+    local placeId    = game.PlaceId
+    local moduleName = GAMES[placeId]
+    local isFallback = false
 
-if not moduleName then
-    moduleName = FALLBACK_MODULE
-    isFallback = true
-    Logger.warn("No module for PlaceId " .. placeId .. ", using fallback")
+    if not moduleName then
+        moduleName = FALLBACK_MODULE
+        isFallback = true
+        Logger.warn("No module for PlaceId " .. placeId .. ", using fallback")
+    end
+
+    local code = fetch(BASE_URL .. "modules/games/" .. moduleName .. ".lua")
+
+    if not code then
+        Logger.error("Fetch failed: modules/games/" .. moduleName .. ".lua")
+        Window:AddSection("Error")
+        Window:AddLabel("Failed to fetch module: " .. moduleName, P.ERROR)
+        return
+    end
+
+    local okRun, modOrErr = runLua(code)
+    if not okRun then
+        Logger.error("Module " .. moduleName .. " load failed: " .. tostring(modOrErr))
+        Window:AddSection("Error")
+        Window:AddLabel("Module load failed: " .. moduleName, P.ERROR)
+        return
+    end
+
+    if type(modOrErr) ~= "table" or type(modOrErr.build) ~= "function" then
+        Logger.error("Invalid module format: " .. moduleName)
+        Window:AddSection("Error")
+        Window:AddLabel("Invalid module contract: " .. moduleName, P.ERROR)
+        return
+    end
+
+    local mod = modOrErr
+
+    local ctx = {
+        Logger     = Logger,
+        GuiUtil    = GuiUtil,
+        AntiAFK    = AntiAFK,
+        isFallback = isFallback,
+        placeId    = placeId,
+        baseUrl    = BASE_URL,
+    }
+
+    local okBuild, buildErr = pcall(mod.build, mod, Window, ctx)
+    if not okBuild then
+        Logger.error("Module build error: " .. tostring(buildErr))
+        Window:AddSection("Error")
+        Window:AddLabel("Build error: " .. tostring(buildErr), P.ERROR)
+    else
+        Logger.success("Module loaded: " .. tostring(mod.name or moduleName))
+    end
 end
 
-local code = fetch(BASE_URL .. "modules/games/" .. moduleName .. ".lua")
-
-if not code then
-    Logger.error("Fetch failed: modules/games/" .. moduleName .. ".lua")
-    Window:AddSection("Error")
-    Window:AddLabel("Failed to fetch module: " .. moduleName, P.ERROR)
-    goto done
-end
-
-local okRun, modOrErr = runLua(code)
-if not okRun then
-    Logger.error("Module " .. moduleName .. " load failed: " .. tostring(modOrErr))
-    Window:AddSection("Error")
-    Window:AddLabel("Module load failed: " .. moduleName, P.ERROR)
-    goto done
-end
-
--- Validasi kontrak module
-if type(modOrErr) ~= "table" or type(modOrErr.build) ~= "function" then
-    Logger.error("Invalid module format: " .. moduleName)
-    Window:AddSection("Error")
-    Window:AddLabel("Invalid module contract: " .. moduleName, P.ERROR)
-    goto done
-end
-
-local mod = modOrErr
-
--- Kirim context ke module
-local ctx = {
-    Logger     = Logger,
-    GuiUtil    = GuiUtil,
-    AntiAFK    = AntiAFK,
-    isFallback = isFallback,
-    placeId    = placeId,
-    baseUrl    = BASE_URL,
-}
-
-local okBuild, buildErr = pcall(mod.build, mod, Window, ctx)
-if not okBuild then
-    Logger.error("Module build error: " .. tostring(buildErr))
-    Window:AddSection("Error")
-    Window:AddLabel("Build error: " .. tostring(buildErr), P.ERROR)
-else
-    Logger.success("Module loaded: " .. tostring(mod.name or moduleName))
-end
-
-::done::
+loadGameModule()
 
 -- ============================================================
 -- INFO
