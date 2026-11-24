@@ -1,7 +1,7 @@
 --[[
 ============================================================
   TEN HUB Game Module: Cultivation Unbound
-  Combat via CombatHit:FireServer(mob, combo 1-4)
+  Fix: marker-only quest state, teleport ke Shen, cooldown accept
 ============================================================
 ]]
 
@@ -20,27 +20,29 @@ function Game.build(window, ctx)
     local P      = ctx.GuiUtil.Palette
 
     local state = {
-        running      = false,
-        totalKills   = 0,
-        questCleared = 0,
-        combo        = 1,
-        lastHitTime  = 0,
+        running       = false,
+        totalKills    = 0,
+        questCleared  = 0,
+        combo         = 1,
+        lastAccept    = 0,
+        acceptAttempts = 0,
     }
 
     local CONFIG = {
         MOB_NAME         = "Core Disciple",
-        ENEMIES_FOLDER   = "CultivatorCamps",   -- 🔥 path baru
+        ENEMIES_FOLDER   = "CultivatorCamps",
         ANCHOR_NAME      = "Anchor_CoreDisciple",
         MARKER_NAME      = "QuestTarget_CoreDisciple",
         SEARCH_RADIUS    = 500,
         ATTACK_REACH     = 4,
-        HIT_INTERVAL     = 0.35,   -- match observed
+        SHEN_REACH       = 5,      -- jarak deket Shen buat prompt
+        HIT_INTERVAL     = 0.35,
         LOOP_TICK        = 0.15,
-        ACCEPT_RETRY     = 5,
+        ACCEPT_COOLDOWN  = 2.0,    -- jeda antar attempt accept (detik)
+        ACCEPT_RETRY     = 5,      -- retry dalam 1 attempt
         MAX_HITS_PER_MOB = 300,
     }
 
-    -- === REFS ===
     local refs = { shen = nil, prompt = nil, anchor = nil, combatHit = nil }
 
     local function initRefs()
@@ -53,12 +55,12 @@ function Game.build(window, ctx)
             if f then
                 refs.anchor = f:FindFirstChild(CONFIG.ANCHOR_NAME)
             end
-            local events = RS:FindFirstChild("CultivationEvents")
-            if events then
-                refs.combatHit = events:FindFirstChild("CombatHit")
+            local ev = RS:FindFirstChild("CultivationEvents")
+            if ev then
+                refs.combatHit = ev:FindFirstChild("CombatHit")
             end
         end)
-        return refs.shen ~= nil and refs.combatHit ~= nil
+        return refs.shen and refs.prompt and refs.combatHit
     end
 
     local function getHRP()
@@ -66,11 +68,29 @@ function Game.build(window, ctx)
         return c and c:FindFirstChild("HumanoidRootPart")
     end
 
-    -- === CARI MOB (path CultivatorCamps) ===
+    -- ============================================================
+    -- QUEST STATE: MARKER ONLY (no mob-alive fallback)
+    -- ============================================================
+    local function isQuestActive()
+        if not refs.anchor then
+            -- re-fetch
+            local f = workspace:FindFirstChild("QuestTargetAnchors")
+            if f then
+                refs.anchor = f:FindFirstChild(CONFIG.ANCHOR_NAME)
+            end
+        end
+        if not refs.anchor then return false end
+
+        local marker = refs.anchor:FindFirstChild(CONFIG.MARKER_NAME)
+        return marker and marker:IsA("BillboardGui") and marker.Enabled
+    end
+
+    -- ============================================================
+    -- MOB FINDING
+    -- ============================================================
     local function findFolderMobs()
         local folder = workspace:FindFirstChild(CONFIG.ENEMIES_FOLDER)
         if not folder then return {} end
-
         local list = {}
         for _, obj in ipairs(folder:GetChildren()) do
             if obj:IsA("Model") and obj.Name:lower():find(
@@ -84,26 +104,11 @@ function Game.build(window, ctx)
         return list
     end
 
-    local function countAliveMobs()
-        return #findFolderMobs()
-    end
-
-    local function isQuestActive()
-        -- 1) marker
-        if refs.anchor then
-            local marker = refs.anchor:FindFirstChild(CONFIG.MARKER_NAME)
-            if marker and marker:IsA("BillboardGui") and marker.Enabled then
-                return true
-            end
-        end
-        -- 2) fallback: ada mob hidup
-        return countAliveMobs() > 0
-    end
+    local function countAliveMobs() return #findFolderMobs() end
 
     local function findClosestMob()
         local hrp = getHRP()
         if not hrp then return nil end
-
         local closest, closestDist = nil, math.huge
         for _, mob in ipairs(findFolderMobs()) do
             local mobHRP = mob:FindFirstChild("HumanoidRootPart")
@@ -118,49 +123,52 @@ function Game.build(window, ctx)
         return closest
     end
 
-    -- === ATTACK: CombatHit + combo counter ===
+    -- ============================================================
+    -- TELEPORT KE SHEN
+    -- ============================================================
+    local function teleportToShen()
+        local hrp = getHRP()
+        if not hrp or not refs.shen then return false end
+        local shenRoot = refs.shen:FindFirstChild("HumanoidRootPart")
+            or refs.shen:FindFirstChild("Torso")
+            or refs.shen.PrimaryPart
+            or refs.shen:FindFirstChildWhichIsA("BasePart", true)
+
+        if not shenRoot then return false end
+
+        hrp.CFrame = shenRoot.CFrame * CFrame.new(0, 0, -CONFIG.SHEN_REACH)
+        task.wait(0.3)  -- tunggu posisi sync
+        return true
+    end
+
+    -- ============================================================
+    -- ATTACK
+    -- ============================================================
     local function attackMob(mob)
         if not mob or not mob.Parent then return false end
         local hrp = getHRP()
         local mobHRP = mob:FindFirstChild("HumanoidRootPart")
         if not hrp or not mobHRP then return false end
 
-        -- Teleport deket mob (proximity, server cek range)
         hrp.CFrame = mobHRP.CFrame * CFrame.new(0, 0, -CONFIG.ATTACK_REACH)
 
-        -- Fire CombatHit dengan combo number (1-4 rotate)
-        local ok, err = pcall(function()
+        local ok = pcall(function()
             refs.combatHit:FireServer(mob, state.combo)
         end)
-        if not ok then
-            Logger.warn("[ATTACK] FireServer error: " .. tostring(err))
-            return false
-        end
+        if not ok then return false end
 
-        -- Rotate combo 1→2→3→4→1
         state.combo = state.combo + 1
         if state.combo > 4 then state.combo = 1 end
-
         return true
     end
 
-    -- === ACCEPT DIALOG ===
-    local function fireQuestPrompt()
-        if not refs.prompt then return false end
-        local ok = pcall(function() fireproximityprompt(refs.prompt) end)
-        if not ok then
-            pcall(function()
-                refs.prompt:InputHoldBegin()
-                task.wait((refs.prompt.HoldDuration or 0) + 0.1)
-                refs.prompt:InputHoldEnd()
-            end)
-        end
-        return true
-    end
-
+    -- ============================================================
+    -- ACCEPT DIALOG
+    -- ============================================================
     local function tryClickAccept()
         local kws = {"accept", "terima", "ambil", "yes", "ok",
-            "confirm", "start", "begin", "mulai", "iya", "yakin", "quest"}
+            "confirm", "start", "begin", "mulai", "iya", "yakin"}
+
         local function match(txt)
             txt = (txt or ""):lower()
             for _, k in ipairs(kws) do
@@ -169,31 +177,40 @@ function Game.build(window, ctx)
             return false
         end
 
+        -- Legacy Dialog
         for _, d in ipairs(workspace:GetDescendants()) do
             if d:IsA("Dialog") and d.Enabled then
                 for _, c in ipairs(d:GetChildren()) do
                     if c:IsA("DialogChoice") and match(c.UserDialog) then
                         local h = player.Character
                             and player.Character:FindFirstChildOfClass("Humanoid")
-                        if h then d:Show(h, c); return true end
+                        if h then
+                            d:Show(h, c)
+                            Logger.info("[ACCEPT] Legacy dialog: " .. c.Name)
+                            return true
+                        end
                     end
                 end
             end
         end
 
+        -- GUI Button
         for _, gui in ipairs(pgui:GetChildren()) do
             if gui:IsA("ScreenGui") and gui.Enabled then
                 for _, b in ipairs(gui:GetDescendants()) do
-                    if (b:IsA("TextButton") or b:IsA("ImageButton"))
-                       and b.Visible and (match(b.Name)
-                       or (b:IsA("TextButton") and match(b.Text))) then
-                        pcall(function() b:Activate() end)
-                        pcall(function()
-                            if b.MouseButton1Click then
-                                b.MouseButton1Click:Fire()
-                            end
-                        end)
-                        return true
+                    if (b:IsA("TextButton") or b:IsA("ImageButton")) and b.Visible then
+                        local txt = b:IsA("TextButton") and b.Text or ""
+                        if match(txt) or match(b.Name) then
+                            pcall(function() b:Activate() end)
+                            pcall(function()
+                                if b.MouseButton1Click then
+                                    b.MouseButton1Click:Fire()
+                                end
+                            end)
+                            Logger.info("[ACCEPT] Btn: " .. b:GetFullName()
+                                .. " | " .. txt)
+                            return true
+                        end
                     end
                 end
             end
@@ -201,55 +218,79 @@ function Game.build(window, ctx)
         return false
     end
 
-    local function acceptDialog()
-        for _ = 1, CONFIG.ACCEPT_RETRY do
-            if not state.running then return false end
-            task.wait(0.5)
-            if tryClickAccept() then return true end
+    local function attemptAcceptQuest()
+        -- Teleport ke Shen dulu
+        if not teleportToShen() then
+            Logger.warn("[ACCEPT] Nggak bisa teleport ke Shen")
+            return false
         end
+
+        -- Fire prompt
+        local fireOk = pcall(function()
+            fireproximityprompt(refs.prompt)
+        end)
+        if not fireOk then
+            pcall(function()
+                refs.prompt:InputHoldBegin()
+                task.wait((refs.prompt.HoldDuration or 0) + 0.1)
+                refs.prompt:InputHoldEnd()
+            end)
+        end
+        Logger.info("[ACCEPT] QuestPrompt fired")
+
+        -- Retry accept dialog
+        for i = 1, CONFIG.ACCEPT_RETRY do
+            if not state.running then return false end
+            task.wait(0.6)
+            if tryClickAccept() then
+                Logger.success("[ACCEPT] ✅ Quest accepted")
+                task.wait(1)  -- biar server kirim marker
+                return true
+            end
+        end
+        Logger.warn("[ACCEPT] ❌ Gagal accept setelah " .. CONFIG.ACCEPT_RETRY .. "x")
         return false
     end
 
-    -- === LOOP UTAMA ===
+    -- ============================================================
+    -- LOOP UTAMA
+    -- ============================================================
     local function autoLoop()
         local wasActive = false
-        local acceptAttempts = 0
 
         while state.running do
             pcall(function()
                 initRefs()
+
                 local active = isQuestActive()
 
-                -- quest complete
+                -- Quest complete
                 if wasActive and not active then
                     state.questCleared = state.questCleared + 1
                     Logger.success(string.format(
                         "[AUTO] ✅ QUEST #%d COMPLETE! Kills: %d",
                         state.questCleared, state.totalKills))
                     wasActive = false
-                    acceptAttempts = 0
                     state.combo = 1
                     task.wait(1.5)
                     return
                 end
 
-                -- ambil quest
+                -- Ambil quest kalau belum aktif
                 if not active then
-                    if acceptAttempts < 3 then
-                        Logger.info("[AUTO] Interact Shen + accept")
-                        fireQuestPrompt()
-                        acceptDialog()
-                        acceptAttempts = acceptAttempts + 1
-                    else
-                        acceptAttempts = 0
+                    -- Cooldown biar nggak spam
+                    if tick() - state.lastAccept < CONFIG.ACCEPT_COOLDOWN then
+                        return
                     end
-                    task.wait(1)
+                    state.lastAccept = tick()
+
+                    Logger.info("[AUTO] Quest nggak aktif, ambil dari Shen")
+                    attemptAcceptQuest()
                     return
                 end
 
-                -- kill mobs
+                -- Quest aktif → kill mobs
                 wasActive = true
-                acceptAttempts = 0
 
                 local target = findClosestMob()
                 if target then
@@ -260,10 +301,12 @@ function Game.build(window, ctx)
                             state.totalKills = state.totalKills + 1
                             Logger.success("[KILL] ✔ Total: " .. state.totalKills)
                             state.combo = 1
+                            task.wait(0.3)
                         end
                     end
                 else
-                    Logger.warn("[AUTO] Nggak ada mob, tunggu spawn")
+                    local alive = countAliveMobs()
+                    Logger.warn("[AUTO] Mob target nggak ada (alive: " .. alive .. ")")
                 end
             end)
 
@@ -281,6 +324,7 @@ function Game.build(window, ctx)
     local killsLabel  = window:AddLabel("Kills: 0", P.TEXT)
     local questsLabel = window:AddLabel("Quest cleared: 0", P.TEXT)
     local comboLabel  = window:AddLabel("Combo: 1", P.GRAY)
+    local phaseLabel  = window:AddLabel("Phase: -", P.GRAY)
 
     task.spawn(function()
         while statusLabel and statusLabel.Parent do
@@ -294,17 +338,25 @@ function Game.build(window, ctx)
             if comboLabel and comboLabel.Parent then
                 comboLabel.Text = "  Combo: " .. state.combo
             end
+            if phaseLabel and phaseLabel.Parent then
+                local phase = "IDLE"
+                if state.running then
+                    phase = isQuestActive() and "KILLING" or "ACCEPTING"
+                end
+                phaseLabel.Text = "  Phase: " .. phase
+            end
         end
     end)
 
     window:AddButton("▶ START", function()
         if state.running then return end
         if not initRefs() then
-            Logger.error("[AUTO] Refs missing (Shen/prompt/CombatHit)")
+            Logger.error("[AUTO] Refs missing")
             return
         end
         state.running = true
         state.combo = 1
+        state.lastAccept = 0
         Logger.success("[AUTO] ▶ STARTED")
         if statusLabel then
             statusLabel.Text = "  Status: RUNNING"
@@ -325,13 +377,21 @@ function Game.build(window, ctx)
     window:AddButton("🔍 Check Refs", function()
         initRefs()
         Logger.info(string.format(
-            "Shen:%s prompt:%s anchor:%s CombatHit:%s mobsAlive:%d",
+            "Shen:%s prompt:%s anchor:%s CombatHit:%s questActive:%s mobsAlive:%d",
             tostring(refs.shen ~= nil),
             tostring(refs.prompt ~= nil),
             tostring(refs.anchor ~= nil),
             tostring(refs.combatHit ~= nil),
+            tostring(isQuestActive()),
             countAliveMobs()
         ))
+    end)
+
+    window:AddButton("🎯 Force Accept (manual)", function()
+        if not initRefs() then
+            Logger.error("Refs missing"); return
+        end
+        attemptAcceptQuest()
     end)
 
     initRefs()
