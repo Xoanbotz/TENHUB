@@ -1,10 +1,10 @@
 --[[
 ============================================================
   TEN HUB Game Module: Cultivation Unbound
-  Fitur: Auto Quest Shen → kill 5 Core Disciple → auto re-accept
+  Fitur: Auto Quest Shen → 5 Core Disciple → auto re-accept
   
+  Flow dialog: 3x Next → Accept → quest aktif → kill
   Combat: CombatHit:FireServer(mob, combo 1-4)
-  Quest:  Shen QuestPrompt → QuestDialogueGui.Next (multi-step)
   Marker: QuestTargetAnchors.Anchor_CoreDisciple.QuestTarget_CoreDisciple
 ============================================================
 ]]
@@ -24,11 +24,11 @@ function Game.build(window, ctx)
     local P      = ctx.GuiUtil.Palette
 
     local state = {
-        running        = false,
-        totalKills     = 0,
-        questCleared   = 0,
-        combo          = 1,
-        lastAccept     = 0,
+        running      = false,
+        totalKills   = 0,
+        questCleared = 0,
+        combo        = 1,
+        lastAccept   = 0,
     }
 
     local CONFIG = {
@@ -47,8 +47,13 @@ function Game.build(window, ctx)
     local refs = { shen = nil, prompt = nil, anchor = nil, combatHit = nil }
 
     -- ============================================================
-    -- INIT REFS
+    -- HELPERS
     -- ============================================================
+    local function safeGet(o, p)
+        local ok, v = pcall(function() return o[p] end)
+        return ok and v or nil
+    end
+
     local function initRefs()
         pcall(function()
             refs.shen = workspace:FindFirstChild("Shen")
@@ -142,7 +147,7 @@ function Game.build(window, ctx)
     end
 
     -- ============================================================
-    -- ATTACK (CombatHit combo 1-4)
+    -- ATTACK
     -- ============================================================
     local function attackMob(mob)
         if not mob or not mob.Parent then return false end
@@ -163,23 +168,45 @@ function Game.build(window, ctx)
     end
 
     -- ============================================================
-    -- ACCEPT DIALOG (Next multi-step)
+    -- DIALOG HANDLER: Next x3 → Accept
     -- ============================================================
-    local function tryClickNext()
+    local function handleDialogClick()
         local qd = pgui:FindFirstChild("QuestDialogueGui")
-        if qd and qd.Enabled then
-            local nextBtn = qd:FindFirstChild("Next", true)
-            if nextBtn and nextBtn:IsA("TextButton") and nextBtn.Visible then
-                pcall(function() nextBtn:Activate() end)
-                pcall(function()
-                    if nextBtn.MouseButton1Click then
-                        nextBtn.MouseButton1Click:Fire()
-                    end
-                end)
-                return true
-            end
+        if not qd or safeGet(qd, "Enabled") ~= true then return nil end
+
+        local dialogue = qd:FindFirstChild("Dialogue", true)
+        if not dialogue then
+            -- fallback: cari Next/Accept langsung di qd
+            dialogue = qd
         end
-        return false
+
+        -- Prioritas: AcceptQuest (kalau udah muncul)
+        local acceptBtn = dialogue:FindFirstChild("AcceptQuest", true)
+        if acceptBtn and acceptBtn:IsA("TextButton") and safeGet(acceptBtn, "Visible") == true then
+            pcall(function() acceptBtn:Activate() end)
+            pcall(function()
+                if acceptBtn.MouseButton1Click then
+                    acceptBtn.MouseButton1Click:Fire()
+                end
+            end)
+            Logger.success("[ACCEPT] Klik AcceptQuest")
+            return "accepted"
+        end
+
+        -- Kalau belum, klik Next
+        local nextBtn = dialogue:FindFirstChild("Next", true)
+        if nextBtn and nextBtn:IsA("TextButton") and safeGet(nextBtn, "Visible") == true then
+            pcall(function() nextBtn:Activate() end)
+            pcall(function()
+                if nextBtn.MouseButton1Click then
+                    nextBtn.MouseButton1Click:Fire()
+                end
+            end)
+            Logger.info("[ACCEPT] Klik Next")
+            return "clicked"
+        end
+
+        return nil
     end
 
     local function attemptAcceptQuest()
@@ -200,36 +227,36 @@ function Game.build(window, ctx)
         end
         Logger.info("[ACCEPT] QuestPrompt fired")
 
-        -- Loop klik Next sampe dialog nutup
-        local dialogClosed = false
+        local acceptClicked = false
+
         for i = 1, CONFIG.MAX_NEXT_CLICKS do
             if not state.running then return false end
-            task.wait(0.5)
+            task.wait(0.6)
 
             local qd = pgui:FindFirstChild("QuestDialogueGui")
-            if not qd or not qd.Enabled then
-                dialogClosed = true
-                Logger.info("[ACCEPT] Dialog nutup setelah " .. i .. " klik")
+            if not qd or safeGet(qd, "Enabled") ~= true then
+                Logger.info("[ACCEPT] Dialog nutup (iterasi " .. i .. ")")
                 break
             end
 
-            tryClickNext()
-        end
-
-        if not dialogClosed then
-            Logger.warn("[ACCEPT] Dialog masih kebuka setelah "
-                .. CONFIG.MAX_NEXT_CLICKS .. " klik")
-            return false
+            local action = handleDialogClick()
+            if action == "accepted" then
+                acceptClicked = true
+                task.wait(1)
+            elseif action == nil then
+                Logger.warn("[ACCEPT] Nggak ada Next/Accept visible")
+            end
         end
 
         task.wait(1)
 
         if isQuestActive() then
-            Logger.success("[ACCEPT] ✅ Quest accepted")
+            Logger.success("[ACCEPT] ✅ Quest accepted"
+                .. (acceptClicked and " (via Accept btn)" or ""))
             return true
         end
 
-        Logger.warn("[ACCEPT] ❌ Dialog nutup tapi marker belum muncul")
+        Logger.warn("[ACCEPT] ❌ Marker belum muncul")
         return false
     end
 
@@ -244,7 +271,6 @@ function Game.build(window, ctx)
                 initRefs()
                 local active = isQuestActive()
 
-                -- Quest complete
                 if wasActive and not active then
                     state.questCleared = state.questCleared + 1
                     Logger.success(string.format(
@@ -256,7 +282,6 @@ function Game.build(window, ctx)
                     return
                 end
 
-                -- Ambil quest
                 if not active then
                     if tick() - state.lastAccept < CONFIG.ACCEPT_COOLDOWN then
                         return
@@ -267,7 +292,6 @@ function Game.build(window, ctx)
                     return
                 end
 
-                -- Kill mobs
                 wasActive = true
                 local target = findClosestMob()
                 if target then
@@ -368,7 +392,9 @@ function Game.build(window, ctx)
         if not initRefs() then
             Logger.error("Refs missing"); return
         end
+        state.running = true
         attemptAcceptQuest()
+        state.running = false
     end)
 
     initRefs()
