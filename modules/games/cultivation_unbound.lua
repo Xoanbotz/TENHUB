@@ -1,7 +1,8 @@
 --[[
-  TEN HUB Game Module: Cultivation Unbound (v3)
-  Fitur: Auto Quest + Auto Kill (Shen -> Core Disciple)
-  Anchor_CoreDisciple = quest marker (muncul saat quest aktif, opsional)
+============================================================
+  TEN HUB Game Module: Cultivation Unbound
+  Fitur: START → auto interact Shen + accept + kill mobs
+============================================================
 ]]
 
 local Players = game:GetService("Players")
@@ -18,39 +19,49 @@ function Game.build(window, ctx)
     local Logger = ctx.Logger
     local P      = ctx.GuiUtil.Palette
 
-    local state = { running = false, runId = 0, totalKills = 0, questCleared = 0 }
+    local state = {
+        running      = false,
+        totalKills   = 0,
+        questCleared = 0,
+    }
 
     local CONFIG = {
         MOB_NAME      = "Core Disciple",
         ANCHOR_NAME   = "Anchor_CoreDisciple",
         MARKER_NAME   = "QuestTarget_CoreDisciple",
-        SEARCH_RADIUS = 250,
+        SEARCH_RADIUS = 500,   -- radius besar buat deteksi mob
         ATTACK_REACH  = 3,
-        KILL_TICK     = 0.08,
+        KILL_TICK     = 0.05,
         LOOP_TICK     = 0.3,
-        ACCEPT_WAIT   = 1.5,
-        MAX_HITS      = 150,
-        RESCAN_DELAY  = 3,
+        ACCEPT_RETRY  = 5,
     }
-    local MOB_LOWER = CONFIG.MOB_NAME:lower()
 
     local refs = { shen = nil, prompt = nil, anchor = nil }
-    local mobContainer, lastFullScan = nil, 0
 
-    local idleConn = player.Idled:Connect(function()
-        VU:CaptureController()
-        VU:ClickButton2(Vector2.new())
-    end)
+    -- ============================================================
+    -- REFS
+    -- ============================================================
+    local function findAnchor()
+        local f = workspace:FindFirstChild("QuestTargetAnchors")
+        if not f then return nil end
+        local exact = f:FindFirstChild(CONFIG.ANCHOR_NAME)
+        if exact then return exact end
+        local key = CONFIG.MOB_NAME:lower():gsub("%s", "")
+        for _, c in ipairs(f:GetChildren()) do
+            if c.Name:lower():find(key, 1, true) then return c end
+        end
+        return nil
+    end
 
-    -- === HELPERS ===
-    local function alive(i) return i ~= nil and i.Parent ~= nil end
-
-    local function getPos(inst)
-        if not inst then return nil end
-        if inst:IsA("BasePart") then return inst.Position end
-        if inst:IsA("Attachment") then return inst.WorldPosition end
-        if inst:IsA("Model") then return inst:GetPivot().Position end
-        return getPos(inst.Parent)
+    local function initRefs()
+        pcall(function()
+            refs.shen = workspace:FindFirstChild("Shen")
+            if refs.shen then
+                refs.prompt = refs.shen:FindFirstChild("QuestPrompt", true)
+            end
+            refs.anchor = findAnchor()
+        end)
+        return refs.shen ~= nil and refs.prompt ~= nil
     end
 
     local function getHRP()
@@ -58,99 +69,76 @@ function Game.build(window, ctx)
         return c and c:FindFirstChild("HumanoidRootPart")
     end
 
-    local function isAlive()
-        local c = player.Character
-        local h = c and c:FindFirstChildOfClass("Humanoid")
-        return h ~= nil and h.Health > 0
-    end
-
-    local function findAnchor()
-        local folder = workspace:FindFirstChild("QuestTargetAnchors")
-        if not folder then return nil end
-        local exact = folder:FindFirstChild(CONFIG.ANCHOR_NAME)
-        if exact then return exact end
-        local key = MOB_LOWER:gsub("%s", "")
-        for _, c in ipairs(folder:GetChildren()) do
-            if c.Name:lower():find(key, 1, true) then return c end
+    -- ============================================================
+    -- CARI MOB HIDUP (deteksi quest aktif alternatif)
+    -- ============================================================
+    local function countAliveMobs()
+        local n = 0
+        for _, obj in ipairs(workspace:GetDescendants()) do
+            if obj:IsA("Model") and obj.Name:lower() == CONFIG.MOB_NAME:lower() then
+                local hum = obj:FindFirstChildOfClass("Humanoid")
+                if hum and hum.Health > 0 then n = n + 1 end
+            end
         end
-        return nil
-    end
-
-    -- Hanya cari ulang yang hilang (hemat). Anchor opsional.
-    local function initRefs()
-        pcall(function()
-            if not alive(refs.shen) then
-                refs.shen, refs.prompt = workspace:FindFirstChild("Shen"), nil
-            end
-            if refs.shen and not alive(refs.prompt) then
-                refs.prompt = refs.shen:FindFirstChild("QuestPrompt", true)
-            end
-            if not alive(refs.anchor) then refs.anchor = findAnchor() end
-        end)
-        return refs.shen ~= nil and refs.prompt ~= nil
+        return n
     end
 
     local function isQuestActive()
-        if not alive(refs.anchor) then
-            refs.anchor = findAnchor()
-            if not refs.anchor then return false end
+        -- Cara 1: marker anchor
+        if not refs.anchor then refs.anchor = findAnchor() end
+        if refs.anchor then
+            local marker = refs.anchor:FindFirstChild(CONFIG.MARKER_NAME)
+            if marker and marker:IsA("BillboardGui") and marker.Enabled then
+                return true
+            end
         end
-        local marker = refs.anchor:FindFirstChild(CONFIG.MARKER_NAME)
-        return marker ~= nil and marker:IsA("BillboardGui") and marker.Enabled
+        -- Cara 2: ada mob hidup (fallback)
+        return countAliveMobs() > 0
     end
 
-    -- === QUEST ===
-    local function goNearShen()
-        local hrp, pos = getHRP(), getPos(refs.prompt)
-        if not hrp or not pos then return end
-        local range = refs.prompt.MaxActivationDistance or 10
-        if (hrp.Position - pos).Magnitude > range - 2 then
-            hrp.CFrame = CFrame.new(pos + Vector3.new(0, 0, 3))
-            task.wait(0.2)
-        end
-    end
-
+    -- ============================================================
+    -- INTERACT SHEN
+    -- ============================================================
     local function fireQuestPrompt()
-        if not alive(refs.prompt) then return end
-        goNearShen()
-        if not pcall(fireproximityprompt, refs.prompt) then
+        if not refs.prompt then return false end
+        local ok = pcall(function() fireproximityprompt(refs.prompt) end)
+        if not ok then
             pcall(function()
                 refs.prompt:InputHoldBegin()
-                task.wait(refs.prompt.HoldDuration + 0.1)
+                task.wait((refs.prompt.HoldDuration or 0) + 0.1)
                 refs.prompt:InputHoldEnd()
             end)
         end
+        return true
     end
 
-    local ACCEPT = { accept = true, ambil = true, terima = true, yes = true, ok = true, okay = true }
-    local function isAcceptText(s)
-        for w in (s or ""):lower():gmatch("%a+") do
-            if ACCEPT[w] then return true end
+    -- ============================================================
+    -- ACCEPT DIALOG (multi-pattern, retry, agresif)
+    -- ============================================================
+    local function tryClickAccept()
+        local keywords = {
+            "accept", "terima", "ambil", "yes", "ok", "confirm",
+            "start", "begin", "mulai", "iya", "yakin", "quest"
+        }
+
+        local function matches(txt)
+            txt = (txt or ""):lower()
+            for _, k in ipairs(keywords) do
+                if txt:find(k, 1, true) then return true end
+            end
+            return false
         end
-        return false
-    end
 
-    local function clickButton(btn)
-        if firesignal and pcall(firesignal, btn.MouseButton1Click) then return true end
-        if getconnections then
-            return pcall(function()
-                for _, c in ipairs(getconnections(btn.MouseButton1Click)) do c:Fire() end
-                for _, c in ipairs(getconnections(btn.Activated)) do c:Fire() end
-            end)
-        end
-        return false
-    end
-
-    local function acceptDialog()
-        task.wait(CONFIG.ACCEPT_WAIT)
-
-        local hum = player.Character and player.Character:FindFirstChildOfClass("Humanoid")
-        if refs.shen and hum then
-            for _, d in ipairs(refs.shen:GetDescendants()) do
-                if d:IsA("Dialog") then
-                    for _, ch in ipairs(d:GetChildren()) do
-                        if ch:IsA("DialogChoice") and isAcceptText(ch.UserDialog) then
-                            pcall(function() d:Show(hum, ch) end)
+        -- 1) Legacy Dialog
+        for _, d in ipairs(workspace:GetDescendants()) do
+            if d:IsA("Dialog") and d.Enabled then
+                for _, choice in ipairs(d:GetChildren()) do
+                    if choice:IsA("DialogChoice") and matches(choice.UserDialog) then
+                        local hum = player.Character
+                            and player.Character:FindFirstChildOfClass("Humanoid")
+                        if hum then
+                            d:Show(hum, choice)
+                            Logger.info("[ACCEPT] Legacy dialog: " .. choice.Name)
                             return true
                         end
                     end
@@ -158,116 +146,173 @@ function Game.build(window, ctx)
             end
         end
 
+        -- 2) ScreenGui TextButton
         for _, gui in ipairs(pgui:GetChildren()) do
             if gui:IsA("ScreenGui") and gui.Enabled then
-                for _, d in ipairs(gui:GetDescendants()) do
-                    if d:IsA("TextButton") and d.Visible and isAcceptText(d.Text) then
-                        if clickButton(d) then return true end
+                for _, desc in ipairs(gui:GetDescendants()) do
+                    if desc:IsA("TextButton") and desc.Visible then
+                        if matches(desc.Text) or matches(desc.Name) then
+                            pcall(function() desc:Activate() end)
+                            pcall(function()
+                                if desc.MouseButton1Click then
+                                    desc.MouseButton1Click:Fire()
+                                end
+                            end)
+                            Logger.info("[ACCEPT] Button: " .. desc:GetFullName())
+                            return true
+                        end
                     end
                 end
             end
         end
-        return false
-    end
 
-    -- === MOB ===
-    -- Referensi: anchor (kalau ada), kalau tidak ada pakai posisi player
-    local function pickClosest(list, refPos, radius)
-        local closest, best = nil, radius
-        for _, obj in ipairs(list) do
-            if obj:IsA("Model") and obj.Name:lower() == MOB_LOWER then
-                local hum = obj:FindFirstChildOfClass("Humanoid")
-                local hrp = obj:FindFirstChild("HumanoidRootPart")
-                if hum and hum.Health > 0 and hrp then
-                    local d = (hrp.Position - refPos).Magnitude
-                    if d < best then closest, best = obj, d end
+        -- 3) ImageButton dengan nama accept
+        for _, gui in ipairs(pgui:GetChildren()) do
+            if gui:IsA("ScreenGui") and gui.Enabled then
+                for _, desc in ipairs(gui:GetDescendants()) do
+                    if desc:IsA("ImageButton") and desc.Visible and matches(desc.Name) then
+                        pcall(function() desc:Activate() end)
+                        Logger.info("[ACCEPT] ImageButton: " .. desc:GetFullName())
+                        return true
+                    end
                 end
             end
         end
-        return closest
+
+        return false
     end
 
-    local function findTargetMob()
-        local refPos, radius = getPos(refs.anchor), CONFIG.SEARCH_RADIUS
-        if not refPos then
-            local hrp = getHRP()
-            if not hrp then return nil end
-            refPos, radius = hrp.Position, math.huge
+    local function acceptDialog()
+        for attempt = 1, CONFIG.ACCEPT_RETRY do
+            if not state.running then return false end
+            task.wait(0.5)
+            if tryClickAccept() then return true end
         end
-
-        if alive(mobContainer) then
-            local m = pickClosest(mobContainer:GetChildren(), refPos, radius)
-            if m then return m end
-        end
-        if os.clock() - lastFullScan < CONFIG.RESCAN_DELAY then return nil end
-        lastFullScan = os.clock()
-        local m = pickClosest(workspace:GetDescendants(), refPos, radius)
-        mobContainer = m and m.Parent or nil
-        return m
+        return false
     end
 
-    local function killMob(mob, myRun)
-        local hum = mob:FindFirstChildOfClass("Humanoid")
-        if not hum then return end
-        local hits = 0
+    -- ============================================================
+    -- CARI & KILL MOB
+    -- ============================================================
+    local function findClosestMob()
+        local hrp = getHRP()
+        if not hrp then return nil end
 
-        while state.running and state.runId == myRun
-              and alive(mob) and hum.Health > 0 and hits < CONFIG.MAX_HITS do
-            local mobHRP, hrp = mob:FindFirstChild("HumanoidRootPart"), getHRP()
-            if not mobHRP or not hrp or not isAlive() then break end
+        local anchorPos
+        if refs.anchor then anchorPos = refs.anchor.Position end
 
-            local pos = (mobHRP.CFrame * CFrame.new(0, 0, -CONFIG.ATTACK_REACH)).Position
-            hrp.CFrame = CFrame.lookAt(pos, mobHRP.Position)
-
-            local cam = workspace.CurrentCamera
-            VU:Button1Down(Vector2.new(0, 0), cam and cam.CFrame)
-            task.wait(0.03)
-            VU:Button1Up(Vector2.new(0, 0), cam and cam.CFrame)
-            task.wait(CONFIG.KILL_TICK)
-            hits += 1
-        end
-
-        if hum.Health <= 0 then state.totalKills += 1 end
-    end
-
-    -- === LOOP ===
-    local function autoLoop(myRun)
-        local wasActive, warned = false, false
-
-        while state.running and state.runId == myRun do
-            local ok, err = pcall(function()
-                if not isAlive() then task.wait(1) return end
-
-                if not initRefs() then
-                    if not warned then Logger.warn("[AUTO] Shen/prompt hilang, tunggu...") warned = true end
-                    task.wait(1)
-                    return
+        local closest, closestDist = nil, math.huge
+        for _, obj in ipairs(workspace:GetDescendants()) do
+            if obj:IsA("Model") and obj.Name:lower() == CONFIG.MOB_NAME:lower() then
+                local hum = obj:FindFirstChildOfClass("Humanoid")
+                local mobHRP = obj:FindFirstChild("HumanoidRootPart")
+                if hum and hum.Health > 0 and mobHRP then
+                    -- Utamakan deket anchor kalau ada
+                    local dist = anchorPos
+                        and (mobHRP.Position - anchorPos).Magnitude
+                        or (mobHRP.Position - hrp.Position).Magnitude
+                    if dist < closestDist then
+                        closest = obj
+                        closestDist = dist
+                    end
                 end
-                warned = false
+            end
+        end
+
+        if closest and closestDist <= CONFIG.SEARCH_RADIUS then
+            return closest
+        end
+        return nil
+    end
+
+    local function killMob(mob)
+        local hits = 0
+        while state.running and mob and mob.Parent do
+            local hum = mob:FindFirstChildOfClass("Humanoid")
+            if not hum or hum.Health <= 0 then break end
+
+            local mobHRP = mob:FindFirstChild("HumanoidRootPart")
+            local hrp = getHRP()
+            if not mobHRP or not hrp then break end
+
+            -- Teleport ke mob (agresif, tiap hit)
+            hrp.CFrame = mobHRP.CFrame * CFrame.new(0, 0, -CONFIG.ATTACK_REACH)
+
+            -- Attack
+            VU:Button1Down(Vector2.new())
+            task.wait(0.05)
+            VU:Button1Up(Vector2.new())
+            task.wait(CONFIG.KILL_TICK)
+
+            hits = hits + 1
+            if hits > 200 then
+                Logger.warn("[KILL] Mob nggak mati dalam 200 hit, skip")
+                break
+            end
+        end
+
+        pcall(function()
+            local hum = mob and mob:FindFirstChildOfClass("Humanoid")
+            if hum and hum.Health <= 0 then
+                state.totalKills = state.totalKills + 1
+                Logger.success("[KILL] Mob killed. Total: " .. state.totalKills)
+            end
+        end)
+    end
+
+    -- ============================================================
+    -- LOOP UTAMA
+    -- ============================================================
+    local function autoLoop()
+        local wasActive = false
+        local acceptAttempts = 0
+
+        while state.running do
+            pcall(function()
+                initRefs()
 
                 local active = isQuestActive()
-                if wasActive and not active then
-                    state.questCleared += 1
-                    Logger.success(string.format("[AUTO] Quest #%d COMPLETE! Total kills: %d",
-                        state.questCleared, state.totalKills))
-                end
-                wasActive = active
 
-                if not active then
-                    fireQuestPrompt()
-                    acceptDialog()
+                -- Quest complete detection
+                if wasActive and not active then
+                    state.questCleared = state.questCleared + 1
+                    Logger.success(string.format(
+                        "[AUTO] Quest #%d COMPLETE! Kills: %d",
+                        state.questCleared, state.totalKills))
+                    wasActive = false
+                    acceptAttempts = 0
                     task.wait(1)
                     return
                 end
 
-                local target = findTargetMob()
+                -- Quest nggak aktif → interact Shen + accept
+                if not active then
+                    if acceptAttempts < 3 then
+                        Logger.info("[AUTO] Interact Shen + accept quest")
+                        fireQuestPrompt()
+                        acceptDialog()
+                        acceptAttempts = acceptAttempts + 1
+                    else
+                        Logger.warn("[AUTO] Gagal accept 3x, retry...")
+                        acceptAttempts = 0
+                    end
+                    task.wait(1)
+                    return
+                end
+
+                -- Quest aktif → kill mobs
+                wasActive = true
+                acceptAttempts = 0
+
+                local target = findClosestMob()
                 if target then
-                    killMob(target, myRun)
+                    Logger.info("[AUTO] Kill: " .. target.Name)
+                    killMob(target)
                 else
-                    task.wait(0.5)
+                    Logger.warn("[AUTO] Mob belum spawn")
                 end
             end)
-            if not ok then Logger.warn("[AUTO] Error: " .. tostring(err)) end
+
             task.wait(CONFIG.LOOP_TICK)
         end
     end
@@ -283,57 +328,72 @@ function Game.build(window, ctx)
     local killsLabel  = window:AddLabel("Kills: 0", P.TEXT)
     local questsLabel = window:AddLabel("Quest cleared: 0", P.TEXT)
 
-    local function setStatus(text, color)
-        if statusLabel and statusLabel.Parent then
-            statusLabel.Text = "  Status: " .. text
-            statusLabel.TextColor3 = color
-        end
-    end
-
     task.spawn(function()
         while statusLabel and statusLabel.Parent do
             task.wait(0.5)
-            killsLabel.Text  = "  Kills: " .. state.totalKills
-            questsLabel.Text = "  Quest cleared: " .. state.questCleared
+            if killsLabel and killsLabel.Parent then
+                killsLabel.Text = "  Kills: " .. state.totalKills
+            end
+            if questsLabel and questsLabel.Parent then
+                questsLabel.Text = "  Quest cleared: " .. state.questCleared
+            end
         end
-        state.running = false
-        idleConn:Disconnect()
     end)
 
-    window:AddButton("▶ START Auto Quest", function()
-        if state.running then Logger.warn("[AUTO] Udah jalan, stop dulu") return end
-        if not initRefs() then
-            Logger.error("[AUTO] Shen/QuestPrompt belum ketemu")
-            setStatus("FAILED (Shen missing)", P.ERROR)
+    window:AddButton("▶ START (Auto All)", function()
+        if state.running then
+            Logger.warn("[AUTO] Udah jalan")
             return
         end
+        if not initRefs() then
+            Logger.error("[AUTO] Shen/QuestPrompt nggak ketemu")
+            if statusLabel then
+                statusLabel.Text = "  Status: FAILED (Shen missing)"
+                statusLabel.TextColor3 = P.ERROR
+            end
+            return
+        end
+
         state.running = true
-        state.runId += 1
-        Logger.success("[AUTO] ▶ STARTED")
-        setStatus("RUNNING", P.SUCCESS)
-        task.spawn(autoLoop, state.runId)
+        Logger.success("[AUTO] ▶ STARTED — auto interact + kill")
+        if statusLabel then
+            statusLabel.Text = "  Status: RUNNING"
+            statusLabel.TextColor3 = P.SUCCESS
+        end
+        task.spawn(autoLoop)
     end)
 
-    window:AddButton("⏹ STOP Auto Quest", function()
-        if not state.running then Logger.warn("[AUTO] Belum jalan") return end
+    window:AddButton("⏹ STOP", function()
         state.running = false
         Logger.info("[AUTO] ⏹ STOPPED")
-        setStatus("STOPPED", P.WARN)
+        if statusLabel then
+            statusLabel.Text = "  Status: STOPPED"
+            statusLabel.TextColor3 = P.WARN
+        end
     end)
 
     window:AddButton("🔍 Check Refs", function()
-        local basic = initRefs()
-        Logger.info(string.format("Shen:%s prompt:%s anchor:%s (anchor opsional)",
-            tostring(refs.shen ~= nil), tostring(refs.prompt ~= nil), tostring(refs.anchor ~= nil)))
-        ctx.GuiUtil.Notify("TEN HUB", basic and "Shen+Prompt OK" or "Shen/Prompt missing", basic and 2 or 3)
+        initRefs()
+        Logger.info(string.format(
+            "Shen:%s prompt:%s anchor:%s mobsAlive:%d",
+            tostring(refs.shen ~= nil),
+            tostring(refs.prompt ~= nil),
+            tostring(refs.anchor ~= nil),
+            countAliveMobs()
+        ))
+        ctx.GuiUtil.Notify("TEN HUB", "Cek console", 2)
     end)
 
-    window:AddButton("📋 Dump Anchors", function()
-        local anchors = workspace:FindFirstChild("QuestTargetAnchors")
-        if not anchors then Logger.warn("QuestTargetAnchors folder nggak ada") return end
-        Logger.info("=== QuestTargetAnchors children ===")
-        for _, c in ipairs(anchors:GetChildren()) do
-            Logger.info("  [" .. c.ClassName .. "] " .. c.Name)
+    window:AddButton("📋 Dump Active GUIs (debug dialog)", function()
+        for _, gui in ipairs(pgui:GetChildren()) do
+            if gui:IsA("ScreenGui") and gui.Enabled then
+                Logger.info("GUI: " .. gui.Name)
+                for _, d in ipairs(gui:GetDescendants()) do
+                    if d:IsA("TextButton") and d.Visible then
+                        Logger.info("  [BTN] " .. d:GetFullName() .. " | " .. d.Text)
+                    end
+                end
+            end
         end
     end)
 
