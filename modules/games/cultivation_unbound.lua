@@ -1,7 +1,7 @@
 --[[
 ============================================================
   TEN HUB Game Module: Cultivation Unbound
-  Fitur: Auto Quest (Shen → Core Disciple)
+  Fitur: Auto Quest + Auto Kill (Shen → Core Disciple)
 ============================================================
 ]]
 
@@ -12,9 +12,7 @@ local pgui    = player:WaitForChild("PlayerGui")
 
 local Game = {
     name    = "Cultivation Unbound",
-    gameIds = {
-        -- TODO: isi PlaceId game
-    },
+    gameIds = { 110725234112010 },
 }
 
 function Game.build(window, ctx)
@@ -23,8 +21,9 @@ function Game.build(window, ctx)
 
     -- === STATE ===
     local state = {
-        autoQuest    = false,
-        loopRunning  = false,
+        running      = false,
+        totalKills   = 0,
+        questCleared = 0,
     }
 
     -- === CONFIG ===
@@ -33,6 +32,9 @@ function Game.build(window, ctx)
         ANCHOR_NAME   = "Anchor_CoreDisciple",
         SEARCH_RADIUS = 250,
         ATTACK_REACH  = 3,
+        KILL_TICK     = 0.05,   -- delay antar pukulan
+        LOOP_TICK     = 0.3,    -- delay antar iterasi loop utama
+        ACCEPT_WAIT   = 1.5,    -- tunggu dialog accept
     }
 
     -- === REFS ===
@@ -77,7 +79,7 @@ function Game.build(window, ctx)
     end
 
     local function acceptDialog()
-        task.wait(0.8)
+        task.wait(CONFIG.ACCEPT_WAIT)
 
         -- Legacy Dialog
         for _, d in ipairs(workspace:GetDescendants()) do
@@ -88,7 +90,7 @@ function Game.build(window, ctx)
                         if txt:find("accept") or txt:find("ambil")
                            or txt:find("terima") or txt:find("yes")
                            or txt:find("ok") then
-                            local hum = player.Character 
+                            local hum = player.Character
                                 and player.Character:FindFirstChildOfClass("Humanoid")
                             if hum then
                                 d:Show(hum, choice)
@@ -125,7 +127,7 @@ function Game.build(window, ctx)
         local closest, closestDist = nil, CONFIG.SEARCH_RADIUS
 
         for _, obj in ipairs(workspace:GetDescendants()) do
-            if obj:IsA("Model") 
+            if obj:IsA("Model")
                and obj.Name:lower() == CONFIG.MOB_NAME:lower() then
                 local hum = obj:FindFirstChildOfClass("Humanoid")
                 local hrp = obj:FindFirstChild("HumanoidRootPart")
@@ -141,101 +143,167 @@ function Game.build(window, ctx)
         return closest
     end
 
-    local function attackMob(mob)
-        local hum    = mob:FindFirstChildOfClass("Humanoid")
-        local mobHRP = mob:FindFirstChild("HumanoidRootPart")
-        local hrp    = getHRP()
-        if not hum or hum.Health <= 0 or not mobHRP or not hrp then return end
+    -- === KILL AGRESIF: satu mob dipukul terus sampe mati ===
+    local function killMob(mob)
+        local hits = 0
+        while state.running and mob and mob.Parent do
+            local hum = mob:FindFirstChildOfClass("Humanoid")
+            if not hum or hum.Health <= 0 then break end
 
-        hrp.CFrame = mobHRP.CFrame * CFrame.new(0, 0, -CONFIG.ATTACK_REACH)
+            local mobHRP = mob:FindFirstChild("HumanoidRootPart")
+            local hrp = getHRP()
+            if not mobHRP or not hrp then break end
 
-        VU:Button1Down(Vector2.new())
-        task.wait(0.1)
-        VU:Button1Up(Vector2.new())
-    end
+            -- Teleport deket mob + pukul
+            hrp.CFrame = mobHRP.CFrame * CFrame.new(0, 0, -CONFIG.ATTACK_REACH)
+            VU:Button1Down(Vector2.new())
+            task.wait(0.05)
+            VU:Button1Up(Vector2.new())
+            task.wait(CONFIG.KILL_TICK)
 
-    -- === LOOP ===
-    local function startLoop()
-        if state.loopRunning then return end
-        state.loopRunning = true
+            hits = hits + 1
+            if hits > 100 then break end  -- safety
+        end
 
-        task.spawn(function()
-            while state.autoQuest do
-                local ok, err = pcall(function()
-                    if not initRefs() then
-                        Logger.warn("[AUTO] Shen/prompt/anchor missing")
-                        return
-                    end
-
-                    if not isQuestActive() then
-                        fireQuestPrompt()
-                        acceptDialog()
-                        task.wait(2)
-                        return
-                    end
-
-                    local target = findTargetMob()
-                    if target then
-                        attackMob(target)
-                    end
-                end)
-
-                if not ok then
-                    Logger.error("[AUTO] " .. tostring(err))
-                end
-
-                task.wait(0.5)
+        -- Hitung kill kalau mob beneran mati
+        local ok = pcall(function()
+            local hum = mob and mob:FindFirstChildOfClass("Humanoid")
+            if hum and hum.Health <= 0 then
+                state.totalKills = state.totalKills + 1
             end
-            state.loopRunning = false
         end)
     end
 
-    -- === GUI ===
-    window:AddSection("Auto Quest")
+    -- === LOOP UTAMA ===
+    local function autoLoop()
+        local wasActive = false
+
+        while state.running do
+            pcall(function()
+                if not initRefs() then
+                    return
+                end
+
+                local active = isQuestActive()
+
+                -- Deteksi quest complete (dari aktif → nonaktif)
+                if wasActive and not active then
+                    state.questCleared = state.questCleared + 1
+                    Logger.success(
+                        string.format("[AUTO] Quest #%d COMPLETE! Total kills: %d",
+                        state.questCleared, state.totalKills)
+                    )
+                    wasActive = false
+                end
+
+                -- Quest nggak aktif → ambil dari Shen
+                if not active then
+                    fireQuestPrompt()
+                    acceptDialog()
+                    task.wait(2)
+                    return
+                end
+
+                -- Quest aktif → cari & bunuh mob
+                wasActive = true
+                local target = findTargetMob()
+                if target then
+                    Logger.info("[AUTO] Killing: " .. target.Name)
+                    killMob(target)
+                else
+                    Logger.warn("[AUTO] Nggak ada mob target di radius anchor")
+                end
+            end)
+
+            task.wait(CONFIG.LOOP_TICK)
+        end
+    end
+
+    -- ============================================================
+    -- GUI
+    -- ============================================================
+    window:AddSection("Auto Quest — Cultivation Unbound")
     window:AddLabel("Quest Giver: Shen", P.TEXT)
     window:AddLabel("Target: Core Disciple", P.TEXT)
 
-    local statusLabel = window:AddLabel("Status: idle", P.GRAY)
+    local statusLabel = window:AddLabel("Status: IDLE", P.GRAY)
+    local killsLabel  = window:AddLabel("Kills: 0", P.TEXT)
+    local questsLabel = window:AddLabel("Quest cleared: 0", P.TEXT)
 
-    window:AddToggle("Auto Quest Core Disciple", false, function(enabled)
-        state.autoQuest = enabled
-
-        if enabled then
-            Logger.info("[AUTO] Enabled")
-            if statusLabel then
-                statusLabel.Text = "  Status: running"
-                statusLabel.TextColor3 = P.SUCCESS
+    -- Update label berkala
+    task.spawn(function()
+        while statusLabel and statusLabel.Parent do
+            task.wait(0.5)
+            if killsLabel and killsLabel.Parent then
+                killsLabel.Text = "  Kills: " .. state.totalKills
             end
-            startLoop()
-        else
-            Logger.info("[AUTO] Disabled")
-            if statusLabel then
-                statusLabel.Text = "  Status: stopped"
-                statusLabel.TextColor3 = P.GRAY
+            if questsLabel and questsLabel.Parent then
+                questsLabel.Text = "  Quest cleared: " .. state.questCleared
             end
         end
     end)
 
-    window:AddButton("Check Refs", function()
+    -- === TOMBOL START ===
+    window:AddButton("▶ START Auto Quest", function()
+        if state.running then
+            Logger.warn("[AUTO] Udah jalan, stop dulu")
+            return
+        end
+
+        -- Cek refs dulu sebelum start
+        if not initRefs() then
+            Logger.error("[AUTO] Shen/prompt/anchor belum ketemu. Deketin Shen dulu.")
+            if statusLabel then
+                statusLabel.Text = "  Status: FAILED (refs missing)"
+                statusLabel.TextColor3 = P.ERROR
+            end
+            return
+        end
+
+        state.running = true
+        Logger.success("[AUTO] ▶ STARTED")
+        if statusLabel then
+            statusLabel.Text = "  Status: RUNNING"
+            statusLabel.TextColor3 = P.SUCCESS
+        end
+
+        task.spawn(autoLoop)
+    end)
+
+    -- === TOMBOL STOP ===
+    window:AddButton("⏹ STOP Auto Quest", function()
+        if not state.running then
+            Logger.warn("[AUTO] Belum jalan")
+            return
+        end
+
+        state.running = false
+        Logger.info("[AUTO] ⏹ STOPPED")
+        if statusLabel then
+            statusLabel.Text = "  Status: STOPPED"
+            statusLabel.TextColor3 = P.WARN
+        end
+    end)
+
+    -- === TOMBOL CHECK REFS ===
+    window:AddButton("🔍 Check Refs", function()
         local ok = initRefs()
-        local msg = string.format(
+        Logger.info(string.format(
             "Shen:%s prompt:%s anchor:%s",
             tostring(refs.shen ~= nil),
             tostring(refs.prompt ~= nil),
             tostring(refs.anchor ~= nil)
-        )
-        Logger.info("Refs " .. msg)
-
+        ))
         if ok then
             ctx.GuiUtil.Notify("TEN HUB", "Refs OK", 2)
         else
-            ctx.GuiUtil.Notify("TEN HUB", "Refs missing — cek output", 3)
+            ctx.GuiUtil.Notify("TEN HUB", "Refs missing — cek console", 3)
         end
     end)
 
-    -- Init
+    -- Init refs awal
     initRefs()
-    Logger.success("Cultivation Unbound loaded")
+    Logger.success("Cultivation Unbound module loaded")
 end
 
 return Game
