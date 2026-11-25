@@ -387,7 +387,7 @@ function Game.build(window, ctx)
         ))
     end)
 
-    window:AddButton("🎯 Force Accept (manual)", function()
+    window:AddButton(" Force Accept (manual)", function()
         if not initRefs() then
             Logger.error("Refs missing"); return
         end
