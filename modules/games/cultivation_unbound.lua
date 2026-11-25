@@ -1,9 +1,3 @@
---[[
-============================================================
-  TEN HUB Game Module: Cultivation Unbound
-  Fix: marker-only quest state, teleport ke Shen, cooldown accept
-============================================================
-]]
 
 local Players = game:GetService("Players")
 local RS      = game:GetService("ReplicatedStorage")
