@@ -3,9 +3,9 @@
   TEN HUB Game Module: Cultivation Unbound
   Fitur: Auto Quest Shen → 5 Core Disciple → auto re-accept
   
-  Flow dialog: 3x Next → Accept → quest aktif → kill
+  Click: multi-method (Activate, Click:Fire, VIM, VU)
+  Flow: 3x Next → Accept → kill → repeat
   Combat: CombatHit:FireServer(mob, combo 1-4)
-  Marker: QuestTargetAnchors.Anchor_CoreDisciple.QuestTarget_CoreDisciple
 ============================================================
 ]]
 
@@ -42,9 +42,8 @@ function Game.build(window, ctx)
         LOOP_TICK        = 0.15,
         ACCEPT_COOLDOWN  = 2.0,
         MAX_NEXT_CLICKS  = 15,
-        DIALOG_READY_TIMEOUT = 5,    -- detik
-        NEXT_CLICK_DELAY = 0.8,      -- jeda antar Next
-        ACCEPT_WAIT      = 1.5,      -- tunggu server process
+        NEXT_CLICK_DELAY = 0.8,
+        ACCEPT_WAIT      = 1.5,
     }
 
     local refs = { shen = nil, prompt = nil, anchor = nil, combatHit = nil }
@@ -81,7 +80,50 @@ function Game.build(window, ctx)
     end
 
     -- ============================================================
-    -- QUEST STATE (marker only)
+    -- MULTI-METHOD CLICK
+    -- ============================================================
+    local function clickButtonForce(btn)
+        if not btn then return false end
+
+        -- Metode 1: Activate()
+        pcall(function() btn:Activate() end)
+
+        -- Metode 2: Fire MouseButton1Click
+        pcall(function()
+            if btn.MouseButton1Click then
+                btn.MouseButton1Click:Fire()
+            end
+        end)
+
+        -- Metode 3: VirtualInputManager (simulasi klik fisik)
+        pcall(function()
+            local vim = game:GetService("VirtualInputManager")
+            local absPos = btn.AbsolutePosition
+            local absSize = btn.AbsoluteSize
+            local cx = absPos.X + absSize.X / 2
+            local cy = absPos.Y + absSize.Y / 2
+            vim:SendMouseButtonEvent(cx, cy, 0, true, game, 0)
+            task.wait(0.05)
+            vim:SendMouseButtonEvent(cx, cy, 0, false, game, 0)
+        end)
+
+        -- Metode 4: VirtualUser (legacy)
+        pcall(function()
+            local vu = game:GetService("VirtualUser")
+            local absPos = btn.AbsolutePosition
+            local absSize = btn.AbsoluteSize
+            local cx = absPos.X + absSize.X / 2
+            local cy = absPos.Y + absSize.Y / 2
+            vu:Button1Down(Vector2.new(cx, cy))
+            task.wait(0.05)
+            vu:Button1Up(Vector2.new(cx, cy))
+        end)
+
+        return true
+    end
+
+    -- ============================================================
+    -- QUEST STATE
     -- ============================================================
     local function isQuestActive()
         if not refs.anchor then
@@ -181,14 +223,9 @@ function Game.build(window, ctx)
 
         -- Prioritas: AcceptQuest
         local acceptBtn = dialogue:FindFirstChild("AcceptQuest", true)
-        if acceptBtn and acceptBtn:IsA("TextButton") 
+        if acceptBtn and acceptBtn:IsA("TextButton")
            and safeGet(acceptBtn, "Visible") == true then
-            pcall(function() acceptBtn:Activate() end)
-            pcall(function()
-                if acceptBtn.MouseButton1Click then
-                    acceptBtn.MouseButton1Click:Fire()
-                end
-            end)
+            clickButtonForce(acceptBtn)
             Logger.success("[ACCEPT] Klik AcceptQuest")
             return "accepted"
         end
@@ -197,12 +234,7 @@ function Game.build(window, ctx)
         local nextBtn = dialogue:FindFirstChild("Next", true)
         if nextBtn and nextBtn:IsA("TextButton")
            and safeGet(nextBtn, "Visible") == true then
-            pcall(function() nextBtn:Activate() end)
-            pcall(function()
-                if nextBtn.MouseButton1Click then
-                    nextBtn.MouseButton1Click:Fire()
-                end
-            end)
+            clickButtonForce(nextBtn)
             Logger.info("[ACCEPT] Klik Next")
             return "clicked"
         end
@@ -211,6 +243,9 @@ function Game.build(window, ctx)
         return nil
     end
 
+    -- ============================================================
+    -- ACCEPT QUEST FLOW
+    -- ============================================================
     local function attemptAcceptQuest()
         if not teleportToShen() then
             Logger.warn("[ACCEPT] Nggak bisa teleport ke Shen")
@@ -219,7 +254,6 @@ function Game.build(window, ctx)
 
         task.wait(0.5)
 
-        -- Fire prompt
         local fireOk = pcall(function()
             fireproximityprompt(refs.prompt)
         end)
@@ -232,7 +266,7 @@ function Game.build(window, ctx)
         end
         Logger.info("[ACCEPT] QuestPrompt fired, tunggu dialog...")
 
-        -- Polling dialog ready (max 5 detik)
+        -- Polling dialog ready
         local dialogReady = false
         for i = 1, 25 do
             task.wait(0.2)
@@ -256,9 +290,10 @@ function Game.build(window, ctx)
             return false
         end
 
-        -- Loop Next/Accept
+        -- Loop Next/Accept + verifikasi teks berubah
         local acceptClicked = false
         local stuckCount = 0
+        local lastDialogText = nil
 
         for i = 1, CONFIG.MAX_NEXT_CLICKS do
             if not state.running then return false end
@@ -268,6 +303,22 @@ function Game.build(window, ctx)
             if not qd or safeGet(qd, "Enabled") ~= true then
                 Logger.info("[ACCEPT] Dialog nutup (iterasi " .. i .. ")")
                 break
+            end
+
+            -- DEBUG: cek teks dialog
+            local dialogue = qd:FindFirstChild("Dialogue", true) or qd
+            local labelText = ""
+            for _, d in ipairs(dialogue:GetDescendants()) do
+                if d:IsA("TextLabel") and safeGet(d, "Visible")
+                   and safeGet(d, "Text") ~= "" then
+                    labelText = safeGet(d, "Text") or ""
+                    break
+                end
+            end
+
+            if labelText ~= "" and labelText ~= lastDialogText then
+                Logger.info("[ACCEPT] Text: '" .. labelText:sub(1, 50) .. "'")
+                lastDialogText = labelText
             end
 
             local action = handleDialogClick()
@@ -310,7 +361,6 @@ function Game.build(window, ctx)
                 initRefs()
                 local active = isQuestActive()
 
-                -- Quest complete
                 if wasActive and not active then
                     state.questCleared = state.questCleared + 1
                     Logger.success(string.format(
@@ -323,7 +373,6 @@ function Game.build(window, ctx)
                     return
                 end
 
-                -- Accept quest
                 if not active then
                     if tick() - state.lastAccept < CONFIG.ACCEPT_COOLDOWN then
                         return
@@ -336,7 +385,7 @@ function Game.build(window, ctx)
                     else
                         consecutiveFails = consecutiveFails + 1
                         if consecutiveFails >= 3 then
-                            Logger.error("[AUTO] Gagal accept 3x, pause 5 detik")
+                            Logger.error("[AUTO] Gagal 3x, pause 5 detik")
                             task.wait(5)
                             consecutiveFails = 0
                         end
@@ -344,7 +393,6 @@ function Game.build(window, ctx)
                     return
                 end
 
-                -- Kill
                 consecutiveFails = 0
                 wasActive = true
                 local target = findClosestMob()
@@ -406,7 +454,7 @@ function Game.build(window, ctx)
     window:AddButton("▶ START", function()
         if state.running then return end
         if not initRefs() then
-            Logger.error("[AUTO] Refs missing (Shen/prompt/CombatHit)")
+            Logger.error("[AUTO] Refs missing")
             return
         end
         state.running = true
